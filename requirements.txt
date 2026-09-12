@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+requests
+python-dotenv
+supabase
+playwright
+beautifulsoup4
+openai
