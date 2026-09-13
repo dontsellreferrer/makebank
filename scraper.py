@@ -89,19 +89,16 @@ def release_cookie_slot(sb: Client, slot: int, runner: str):
 class CookiePool:
     def __init__(self, path: str, slot_index: int = None, slots_total: int = 5):
         """
-        slot_index/slots_total: if given, this pool only ever uses the cookies
-        belonging to that one slot (a fixed, non-overlapping chunk of the full
-        set) — not the whole pool. This is what makes concurrent scrapes safe:
-        each concurrent run gets its own slot via claim_cookie_slot() (see
-        cookie_slots_schema.sql) and only touches its own 6 cookies, so two
-        concurrent scrapes can never collide on the same cookie the way a
-        single shared round-robin pool could.
-        Omit slot_index for the normal single-run case — unchanged behaviour,
-        uses the whole pool.
+        Loads the full shared cookie pool by default — this is the proven
+        behaviour the scraper has run on for weeks. slot_index/slots_total
+        exist for reference (an earlier concurrency experiment, reverted
+        13 Sep 2026 after it burned cookies faster than the shared pool
+        ever did) but nothing currently calls this with those set.
         """
         self.cookies: list[str] = []
         self.agents:  list[str] = []
         self._index = 0
+        self.burned_count = 0
 
         data = self._load_from_supabase() or self._load_from_file(path)
         if not data:
@@ -156,6 +153,7 @@ class CookiePool:
     def burn(self, index: int):
         if 0 <= index < len(self.cookies):
             log.warning(f"Burning cookie #{index} (429)")
+            self.burned_count += 1
             self.cookies.pop(index)
             self.agents.pop(index)
             if self._index >= len(self.cookies) and self.cookies:
@@ -837,22 +835,20 @@ def main():
             run_reconcile(sb, lga)
             return
 
-        # Every LGA run claims its own cookie slot — even in sequential mode,
-        # since a webhook-triggered hydration could be running concurrently
-        # on the same Railway service and needs to coordinate against this
-        # too, not just against other cron threads.
-        runner = f"lga-{lga['id']}"
-        slot = claim_cookie_slot(sb, runner)
-        try:
-            pool = CookiePool(COOKIES_FILE, slot_index=slot)
-            if args.type in ('listings', 'both'):
-                run_scrape(sb, pool, lga, 'listings', max_pages)
-            if args.type in ('sold', 'both'):
-                run_scrape(sb, pool, lga, 'sold', max_pages)
-            if args.type == 'both':
-                run_reconcile(sb, lga)
-        finally:
-            release_cookie_slot(sb, slot, runner)
+        # Reverted to the shared full 30-cookie pool (13 Sep 2026) — the
+        # slot-partitioning approach was untested against real burn rates
+        # and concentrated load onto far fewer cookies per process (1-in-6
+        # selection odds within a slot vs 1-in-30 across the shared pool),
+        # which plausibly explains burning cookies today after weeks of the
+        # old sequential/shared-pool approach never doing so. Testing the
+        # proven approach rather than the untested one.
+        pool = CookiePool(COOKIES_FILE)
+        if args.type in ('listings', 'both'):
+            run_scrape(sb, pool, lga, 'listings', max_pages)
+        if args.type in ('sold', 'both'):
+            run_scrape(sb, pool, lga, 'sold', max_pages)
+        if args.type == 'both':
+            run_reconcile(sb, lga)
 
     if args.parallel > 1:
         log.info(f"Running {args.parallel} LGAs in parallel")

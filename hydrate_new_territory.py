@@ -66,7 +66,7 @@ from fastapi import FastAPI, Request, HTTPException
 # separate/duplicate implementation to drift out of sync.
 from scraper import (
     get_supabase, CookiePool, URLCollector, scrape_details_playwright,
-    run_scrape, COOKIES_FILE, MAX_PAGES, claim_cookie_slot, release_cookie_slot,
+    run_scrape, COOKIES_FILE, MAX_PAGES,
 )
 
 log = logging.getLogger("hydrate")
@@ -95,7 +95,7 @@ def build_csv(rows: list[dict]) -> str:
     return buf.getvalue()
 
 
-def email_csv(lga_name: str, csv_content: str, row_count: int):
+def email_csv(lga_name: str, csv_content: str, row_count: int, burned_count: int = 0):
     safe_name = lga_name.replace(' ', '_').replace('/', '-')
     if not RESEND_API_KEY:
         # No Resend yet — save it locally instead of just dumping raw CSV
@@ -104,20 +104,27 @@ def email_csv(lga_name: str, csv_content: str, row_count: int):
         filename = f"{safe_name}_hydration.csv"
         with open(filename, "w", encoding="utf-8") as f:
             f.write(csv_content)
-        log.info(f"RESEND_API_KEY not set — saved to {filename} instead ({row_count} rows).")
+        log.info(f"RESEND_API_KEY not set — saved to {filename} instead ({row_count} rows, {burned_count} cookies burned).")
         return
     attachment_b64 = base64.b64encode(csv_content.encode('utf-8')).decode('ascii')
+    burned_note = (
+        f"<p style=\"color:#B45309;\"><strong>{burned_count} cookie(s) burned</strong> during this run "
+        f"(hit a 429 and got dropped from the pool).</p>"
+        if burned_count > 0 else
+        "<p>No cookies burned during this run.</p>"
+    )
     resp = requests.post(
         "https://api.resend.com/emails",
         headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
         json={
             "from": EMAIL_FROM,
             "to": [EMAIL_TO],
-            "subject": f"New territory hydration — {lga_name} ({row_count} listings)",
+            "subject": f"New territory hydration — {lga_name} ({row_count} listings, {burned_count} burned)",
             "html": (
                 f"<p>New territory <strong>{lga_name}</strong> just scraped — "
                 f"{row_count} currently active listings attached as CSV, with a blank "
                 f"<strong>First Seen</strong> column.</p>"
+                f"{burned_note}"
                 f"<p><strong>Dating it (fast, not a slog):</strong></p>"
                 f"<ol>"
                 f"<li>Open the same search on realestate.com.au, sorted Date (Newest → Oldest).</li>"
@@ -148,35 +155,30 @@ def hydrate(lga: dict):
     sb = get_supabase()
     lga_name = lga.get('name', f"LGA {lga.get('id')}")
 
-    # Claims its own cookie slot, same mechanism the cron uses — a new-territory
-    # signup can land at any time, including while the daily cron is mid-run,
-    # so this has to coordinate through the same cookie_slots table rather
-    # than assume it has the pool to itself.
-    runner = f"hydrate-{lga.get('id')}"
-    slot = claim_cookie_slot(sb, runner)
-    pool = CookiePool(COOKIES_FILE, slot_index=slot)
+    # Reverted to the shared full 30-cookie pool (13 Sep 2026) — see the
+    # matching note in scraper.py's process_lga(). No slot claim/release
+    # needed now that every run shares the same pool the old sequential
+    # system always used.
+    pool = CookiePool(COOKIES_FILE)
 
+    # --- Listings: scrape, email as CSV, do NOT save (see module docstring) ---
     try:
-        # --- Listings: scrape, email as CSV, do NOT save (see module docstring) ---
-        try:
-            log.info(f"Hydrating listings for {lga_name} (id={lga['id']}) — CSV export, not saved")
-            collector = URLCollector(pool, max_pages=MAX_PAGES)
-            live_urls = collector.collect_urls(lga['search_url_listings'], known_urls=set())
-            log.info(f"Found {len(live_urls)} active listings")
-            rows = scrape_details_playwright(list(live_urls), pool) if live_urls else []
-            csv_content = build_csv(rows)
-            email_csv(lga_name, csv_content, len(rows))
-        except Exception as e:
-            log.error(f"Listings hydration failed for {lga_name}: {e}")
+        log.info(f"Hydrating listings for {lga_name} (id={lga['id']}) — CSV export, not saved")
+        collector = URLCollector(pool, max_pages=MAX_PAGES)
+        live_urls = collector.collect_urls(lga['search_url_listings'], known_urls=set())
+        log.info(f"Found {len(live_urls)} active listings")
+        rows = scrape_details_playwright(list(live_urls), pool) if live_urls else []
+        csv_content = build_csv(rows)
+        email_csv(lga_name, csv_content, len(rows), pool.burned_count)
+    except Exception as e:
+        log.error(f"Listings hydration failed for {lga_name}: {e}")
 
-        # --- Sold: no dating problem (sold_date is already known) — save as normal ---
-        try:
-            log.info(f"Hydrating sold data for {lga_name}")
-            run_scrape(sb, pool, lga, 'sold', MAX_PAGES)
-        except Exception as e:
-            log.error(f"Sold hydration failed for {lga_name}: {e}")
-    finally:
-        release_cookie_slot(sb, slot, runner)
+    # --- Sold: no dating problem (sold_date is already known) — save as normal ---
+    try:
+        log.info(f"Hydrating sold data for {lga_name}")
+        run_scrape(sb, pool, lga, 'sold', MAX_PAGES)
+    except Exception as e:
+        log.error(f"Sold hydration failed for {lga_name}: {e}")
 
     log.info(f"Hydration complete for {lga_name}")
 
