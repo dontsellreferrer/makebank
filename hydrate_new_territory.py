@@ -54,9 +54,10 @@ Run with:
 import os
 import io
 import csv
+import sys
 import base64
 import logging
-import threading
+import subprocess
 
 import requests
 from fastapi import FastAPI, Request, HTTPException
@@ -192,7 +193,22 @@ async def new_territory(request: Request):
     if not record or "id" not in record:
         raise HTTPException(status_code=400, detail="Missing record.id")
 
-    threading.Thread(target=hydrate, args=(record,), daemon=True).start()
+    # Launched as a genuinely separate OS process, not a background thread.
+    # Playwright's sync API (used throughout scraper.py) cannot coexist with
+    # an asyncio event loop anywhere in the same process — and this whole
+    # app runs on Uvicorn, which *is* an asyncio event loop. A background
+    # thread still shares the same process, so it still hit that conflict
+    # (found 13 Sep 2026 — "Playwright Sync API inside the asyncio loop").
+    # A subprocess has its own separate interpreter and no such loop, so it
+    # behaves exactly like running this file's own --lga-id CLI mode by hand
+    # from a terminal — which already works correctly.
+    # stdout/stderr deliberately NOT redirected to DEVNULL — leaving them
+    # inherited from this process means the subprocess's own log lines
+    # (cookie slot claims, scrape progress, etc.) still show up in Railway's
+    # log viewer exactly as before, just tagged as a separate process.
+    subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "--lga-id", str(record["id"])],
+    )
 
     return {"status": "hydration_started", "lga_id": record["id"]}
 
