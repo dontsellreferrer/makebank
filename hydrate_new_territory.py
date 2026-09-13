@@ -45,7 +45,7 @@ Env vars needed (Railway):
     HYDRATE_WEBHOOK_SECRET   — shared secret, must match the Supabase webhook header
     RESEND_API_KEY           — same one weekly_report.py already uses
     HYDRATE_EMAIL_TO         — defaults to rick@rickjohnson.com.au
-    HYDRATE_EMAIL_FROM       — defaults to reports@referrer.com.au
+    HYDRATE_EMAIL_FROM       — defaults to reports@makebank.com.au
 
 Run with:
     pip install fastapi uvicorn requests --break-system-packages
@@ -77,7 +77,7 @@ app = FastAPI()
 WEBHOOK_SECRET = os.environ.get("HYDRATE_WEBHOOK_SECRET", "")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 EMAIL_TO       = os.environ.get("HYDRATE_EMAIL_TO", "rick@rickjohnson.com.au")
-EMAIL_FROM     = os.environ.get("HYDRATE_EMAIL_FROM", "reports@referrer.com.au")
+EMAIL_FROM     = os.environ.get("HYDRATE_EMAIL_FROM", "reports@makebank.com.au")
 
 
 def build_csv(rows: list[dict]) -> str:

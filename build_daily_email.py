@@ -3,10 +3,10 @@ import urllib.parse
 def build_daily_email_html(
     lga_name, lga_id, date_str, display_date,
     new_listings, new_sales, hot_leads, expiring_soon, newly_expired, new_fsbo,
-    dashboard_base_url="https://app.makebank.com.au/daily-brief.html",
-    logo_url="https://app.makebank.com.au/assets/makebank-logo-white.png",
+    dashboard_base_url="https://makebank.com.au/daily-brief.html",
+    logo_url="https://makebank.com.au/assets/makebank-logo-white.png",
     unsubscribe_token=None,
-    unsubscribe_base_url="https://app.makebank.com.au/unsubscribe.html",
+    unsubscribe_base_url="https://makebank.com.au/unsubscribe.html",
     show_cddready_promo=True,  # the only cross-sell in this email right now — deliberately just one, not the whole ecosystem
 ):
     link = (f"{dashboard_base_url}?date={date_str}"
