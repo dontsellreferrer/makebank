@@ -188,8 +188,26 @@ async function sbInsert(table, rows) {
 // realestate.com.au uses /buy/ and /sold/ as parallel endpoints with the
 // same query params (suburb, boundingBox, geoShape, etc.) — swapping the
 // path segment gives the matching sold-search URL automatically.
+// Forces the correct chronological sort onto a URL, regardless of what
+// (if anything) the user's pasted URL originally had — the entire dating
+// methodology (checkpoint sampling by row position) and the sold-scrape's
+// own cutoff logic both silently depend on results being newest-to-oldest.
+// Confirmed 13 Sep 2026: /buy/ and /sold/ use DIFFERENT sort values for
+// this (list-date vs solddate) — naively copying one URL's sort param onto
+// the other would silently sort the wrong one incorrectly.
+function withSort(url, sortValue) {
+  try {
+    const u = new URL(url);
+    u.searchParams.set('activeSort', sortValue);
+    return u.toString();
+  } catch {
+    return url; // malformed URL — let the realestate.com.au substring check catch it
+  }
+}
+
 function deriveSoldUrl(buyUrl) {
-  return buyUrl.replace('/buy/', '/sold/').replace('/buy?', '/sold?');
+  const soldUrl = buyUrl.replace('/buy/', '/sold/').replace('/buy?', '/sold?');
+  return withSort(soldUrl, 'solddate');
 }
 
 function showStatus(msg, ok) {
@@ -215,6 +233,7 @@ document.getElementById('order-form').addEventListener('submit', async (e) => {
     if (!region_url.includes('realestate.com.au')) {
       throw new Error('Territory URL needs to be a realestate.com.au link.');
     }
+    const sortedListingsUrl = withSort(region_url, 'list-date');
 
     const recipients = Array.from(document.querySelectorAll('.recipient-row')).map(row => ({
       name: row.querySelector('.recipient-name').value.trim(),
@@ -231,8 +250,8 @@ document.getElementById('order-form').addEventListener('submit', async (e) => {
     const [lga] = await sbInsert('lgas', [{
       name: lgaName,
       active: true,
-      search_url_listings: region_url,
-      search_url_sold: deriveSoldUrl(region_url),
+      search_url_listings: sortedListingsUrl,
+      search_url_sold: deriveSoldUrl(sortedListingsUrl),
     }]);
 
     // 2. Record the order, linked to that territory.

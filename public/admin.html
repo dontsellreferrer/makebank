@@ -121,6 +121,25 @@ form{padding:40px 0 60px;}
   <div class="status-msg" id="status-msg"></div>
 </form>
 
+<form class="wrap" id="import-form" style="padding-bottom:60px;border-top:1px solid var(--hairline);padding-top:40px;">
+  <div class="f-section">
+    <div class="f-section-title">Import dated CSV</div>
+    <div class="f-hint" style="margin-bottom:16px;">For a hydration CSV that's had its First Seen column filled in — reuses the exact same import logic as the command line.</div>
+    <div class="f-row">
+      <div class="f-field">
+        <label for="import-lga">Region</label>
+        <select id="import-lga"><option value="">Loading&hellip;</option></select>
+      </div>
+      <div class="f-field">
+        <label for="import-file">Dated CSV file</label>
+        <input type="file" id="import-file" accept=".csv" required>
+      </div>
+    </div>
+  </div>
+  <button type="submit" class="btn btn-primary" id="import-submit-btn">Import CSV</button>
+  <div class="status-msg" id="import-status-msg"></div>
+</form>
+
 <div class="footer">MakeBank internal &middot; not linked from the public site</div>
 
 <script>
@@ -158,8 +177,26 @@ async function sbInsert(table, rows) {
   return r.json();
 }
 
+// Forces the correct chronological sort onto a URL, regardless of what
+// (if anything) the user's pasted URL originally had — the entire dating
+// methodology (checkpoint sampling by row position) and the sold-scrape's
+// own cutoff logic both silently depend on results being newest-to-oldest.
+// Confirmed 13 Sep 2026: /buy/ and /sold/ use DIFFERENT sort values for
+// this (list-date vs solddate) — naively copying one URL's sort param onto
+// the other would silently sort the wrong one incorrectly.
+function withSort(url, sortValue) {
+  try {
+    const u = new URL(url);
+    u.searchParams.set('activeSort', sortValue);
+    return u.toString();
+  } catch {
+    return url; // malformed URL — let the realestate.com.au substring check catch it
+  }
+}
+
 function deriveSoldUrl(buyUrl) {
-  return buyUrl.replace('/buy/', '/sold/').replace('/buy?', '/sold?');
+  const soldUrl = buyUrl.replace('/buy/', '/sold/').replace('/buy?', '/sold?');
+  return withSort(soldUrl, 'solddate');
 }
 
 async function loadExistingPrincipals(lgaId) {
@@ -173,11 +210,55 @@ async function loadExistingPrincipals(lgaId) {
 
 async function loadLgas() {
   const rows = await sbGet('lgas', 'select=id,name&order=name.asc');
+  const options = '<option value="">Select a region&hellip;</option>' + rows.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
+
   const sel = document.getElementById('existing-lga');
-  sel.innerHTML = '<option value="">Select a region&hellip;</option>' + rows.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
+  sel.innerHTML = options;
   sel.addEventListener('change', () => loadExistingPrincipals(sel.value));
+
+  const importSel = document.getElementById('import-lga');
+  importSel.innerHTML = options;
 }
 loadLgas();
+
+function showImportStatus(msg, ok) {
+  const el = document.getElementById('import-status-msg');
+  el.textContent = msg;
+  el.className = `status-msg show ${ok ? 'ok' : 'err'}`;
+}
+
+document.getElementById('import-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('import-submit-btn');
+  const lgaId = document.getElementById('import-lga').value;
+  const fileInput = document.getElementById('import-file');
+
+  if (!lgaId) { showImportStatus('Pick a region first.', false); return; }
+  if (!fileInput.files.length) { showImportStatus('Choose a CSV file first.', false); return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Importing…';
+  document.getElementById('import-status-msg').className = 'status-msg';
+
+  try {
+    const formData = new FormData();
+    formData.append('lga_id', lgaId);
+    formData.append('file', fileInput.files[0]);
+
+    const r = await fetch('/api/import-csv', { method: 'POST', body: formData });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || `Import failed: ${r.status}`);
+
+    showImportStatus(`Imported successfully into region ${lgaId}.`, true);
+    fileInput.value = '';
+  } catch (err) {
+    console.error(err);
+    showImportStatus(err.message || 'Something went wrong.', false);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Import CSV';
+  }
+});
 
 function showStatus(msg, ok) {
   const el = document.getElementById('status-msg');
@@ -206,10 +287,11 @@ document.getElementById('admin-form').addEventListener('submit', async (e) => {
       const url = document.getElementById('new-region-url').value.trim();
       if (!name || !url) throw new Error('New region needs a name and a realestate.com.au URL.');
       if (!url.includes('realestate.com.au')) throw new Error('Territory URL needs to be a realestate.com.au link.');
+      const sortedUrl = withSort(url, 'list-date');
       const [lga] = await sbInsert('lgas', [{
         name, active: true,
-        search_url_listings: url,
-        search_url_sold: deriveSoldUrl(url),
+        search_url_listings: sortedUrl,
+        search_url_sold: deriveSoldUrl(sortedUrl),
       }]);
       lga_id = lga.id;
     }
