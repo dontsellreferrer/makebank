@@ -6,3 +6,4 @@ supabase
 playwright
 beautifulsoup4
 openai
+python-multipart
