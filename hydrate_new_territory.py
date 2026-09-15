@@ -95,13 +95,19 @@ def build_csv(rows: list[dict]) -> str:
     return buf.getvalue()
 
 
-def email_csv(lga_name: str, csv_content: str, row_count: int, burned_count: int = 0):
+def email_csv(lga_id: int, lga_name: str, csv_content: str, row_count: int, burned_count: int = 0):
+    # LGA id is included everywhere here (filename, subject, body, and the
+    # re-import command) — with hundreds of regions, the name alone isn't
+    # enough to unambiguously match an inbox CSV back to the right --lga
+    # number, and typing the id out by hand is exactly the kind of thing
+    # worth eliminating once this isn't just a handful of test regions.
     safe_name = lga_name.replace(' ', '_').replace('/', '-')
+    filename  = f"{lga_id}_{safe_name}_hydration.csv"
+
     if not RESEND_API_KEY:
         # No Resend yet — save it locally instead of just dumping raw CSV
-        # text into the log, so today's 4 regions still produce something
+        # text into the log, so today's regions still produce something
         # actually usable. Switch to email once Resend is set up in Railway.
-        filename = f"{safe_name}_hydration.csv"
         with open(filename, "w", encoding="utf-8") as f:
             f.write(csv_content)
         log.info(f"RESEND_API_KEY not set — saved to {filename} instead ({row_count} rows, {burned_count} cookies burned).")
@@ -119,9 +125,9 @@ def email_csv(lga_name: str, csv_content: str, row_count: int, burned_count: int
         json={
             "from": EMAIL_FROM,
             "to": [EMAIL_TO],
-            "subject": f"New territory hydration — {lga_name} ({row_count} listings, {burned_count} burned)",
+            "subject": f"New territory hydration — {lga_name} (LGA {lga_id}, {row_count} listings, {burned_count} burned)",
             "html": (
-                f"<p>New territory <strong>{lga_name}</strong> just scraped — "
+                f"<p>New territory <strong>{lga_name}</strong> (LGA <strong>{lga_id}</strong>) just scraped — "
                 f"{row_count} currently active listings attached as CSV, with a blank "
                 f"<strong>First Seen</strong> column.</p>"
                 f"{burned_note}"
@@ -135,11 +141,11 @@ def email_csv(lga_name: str, csv_content: str, row_count: int, burned_count: int
                 f"<li>Save the First Seen column as plain <code>YYYY-MM-DD</code> text, not a regional date format — a non-ISO value also silently falls back to today.</li>"
                 f"</ol>"
                 f"<p>Then re-import:</p>"
-                f"<pre>python3 scraper.py --import-csv dated_file.csv --lga &lt;id&gt; --import-table listings</pre>"
+                f"<pre>python3 scraper.py --import-csv dated_file.csv --lga {lga_id} --import-table listings</pre>"
                 f"<p>Full method with worked example in the HANDOVER doc.</p>"
             ),
             "attachments": [{
-                "filename": f"{safe_name}_hydration.csv",
+                "filename": filename,
                 "content": attachment_b64,
             }],
         },
@@ -147,13 +153,14 @@ def email_csv(lga_name: str, csv_content: str, row_count: int, burned_count: int
     if resp.status_code >= 300:
         log.error(f"Resend send failed: {resp.status_code} {resp.text}")
     else:
-        log.info(f"Hydration CSV emailed to {EMAIL_TO} ({row_count} rows)")
+        log.info(f"Hydration CSV emailed to {EMAIL_TO} ({row_count} rows, LGA {lga_id})")
 
 
 def hydrate(lga: dict):
     """Runs in a background thread — the webhook response doesn't wait on this."""
     sb = get_supabase()
-    lga_name = lga.get('name', f"LGA {lga.get('id')}")
+    lga_id   = lga['id']
+    lga_name = lga.get('name', f"LGA {lga_id}")
 
     # Reverted to the shared full 30-cookie pool (13 Sep 2026) — see the
     # matching note in scraper.py's process_lga(). No slot claim/release
@@ -163,13 +170,13 @@ def hydrate(lga: dict):
 
     # --- Listings: scrape, email as CSV, do NOT save (see module docstring) ---
     try:
-        log.info(f"Hydrating listings for {lga_name} (id={lga['id']}) — CSV export, not saved")
+        log.info(f"Hydrating listings for {lga_name} (id={lga_id}) — CSV export, not saved")
         collector = URLCollector(pool, max_pages=MAX_PAGES)
         live_urls = collector.collect_urls(lga['search_url_listings'], known_urls=set())
         log.info(f"Found {len(live_urls)} active listings")
         rows = scrape_details_playwright(list(live_urls), pool) if live_urls else []
         csv_content = build_csv(rows)
-        email_csv(lga_name, csv_content, len(rows), pool.burned_count)
+        email_csv(lga_id, lga_name, csv_content, len(rows), pool.burned_count)
     except Exception as e:
         log.error(f"Listings hydration failed for {lga_name}: {e}")
 

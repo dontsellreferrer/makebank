@@ -127,8 +127,8 @@ form{padding:40px 0 60px;}
     <div class="f-hint" style="margin-bottom:16px;">For a hydration CSV that's had its First Seen column filled in — reuses the exact same import logic as the command line.</div>
     <div class="f-row">
       <div class="f-field">
-        <label for="import-lga">Region</label>
-        <select id="import-lga"><option value="">Loading&hellip;</option></select>
+        <label for="import-lga">LGA number</label>
+        <input type="number" id="import-lga" placeholder="e.g. 46">
       </div>
       <div class="f-field">
         <label for="import-file">Dated CSV file</label>
@@ -215,9 +215,6 @@ async function loadLgas() {
   const sel = document.getElementById('existing-lga');
   sel.innerHTML = options;
   sel.addEventListener('change', () => loadExistingPrincipals(sel.value));
-
-  const importSel = document.getElementById('import-lga');
-  importSel.innerHTML = options;
 }
 loadLgas();
 
