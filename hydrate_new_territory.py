@@ -30,6 +30,17 @@ FLOW
   3. Listings → scraped, emailed as CSV, NOT saved.
      Sold    → scraped and saved directly, same as any normal run.
 
+CONCURRENCY — capped at 3 (14 Sep 2026)
+  Stress-tested on the production VM: ~5-6 concurrent hydrations ran clean,
+  8 concurrent caused realestate.com.au itself to start timing out
+  (Playwright "Page.goto: Timeout 30000ms exceeded" — server-side pushback,
+  not cookie burns, not VM resource limits). With no signup volume limit on
+  how many new-territory webhooks could land at once (e.g. 20 people signing
+  up together), nothing previously stopped every one of them firing a
+  concurrent hydration at once. Capped to MAX_CONCURRENT_HYDRATIONS = 3 for
+  real safety margin under the proven 6-8 ceiling — extra requests queue and
+  run as a slot frees up, rather than firing immediately.
+
 Deploy alongside the existing scraper (same Railway project, same deps —
 imports directly from scraper.py rather than duplicating scraping logic).
 
@@ -56,6 +67,7 @@ import io
 import csv
 import sys
 import base64
+import asyncio
 import logging
 import subprocess
 
@@ -78,6 +90,50 @@ WEBHOOK_SECRET = os.environ.get("HYDRATE_WEBHOOK_SECRET", "")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 EMAIL_TO       = os.environ.get("HYDRATE_EMAIL_TO", "rick@rickjohnson.com.au")
 EMAIL_FROM     = os.environ.get("HYDRATE_EMAIL_FROM", "reports@makebank.com.au")
+
+# ── Concurrency queue ─────────────────────────────────────────────────────
+# See the CONCURRENCY note in the module docstring for why this exists and
+# how the number 3 was chosen. Each hydration still runs as its own OS
+# subprocess (Playwright's sync API can't share this process's asyncio
+# loop — see the comment on subprocess.Popen below) — this queue just
+# controls how many of those subprocesses are allowed to be alive at once.
+MAX_CONCURRENT_HYDRATIONS = 3
+_active: list[subprocess.Popen] = []   # currently-running hydration subprocesses
+_queue: list[dict] = []                # lga rows waiting for a free slot
+_lock = asyncio.Lock()                 # guards both lists — single event loop, but be explicit
+
+
+def _launch(lga_id: int) -> subprocess.Popen:
+    # Same subprocess approach as before, just factored out so both the
+    # immediate-launch path and the queue-drain path share one code path.
+    # stdout/stderr deliberately NOT redirected to DEVNULL — leaving them
+    # inherited means each subprocess's own log lines still show up in
+    # `journalctl -u makebank-hydrate`, just tagged with its own PID.
+    return subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "--lga-id", str(lga_id)],
+    )
+
+
+async def _drain_queue_loop():
+    """
+    Runs for the lifetime of the app. Every 5 seconds: drops any finished
+    processes from _active, then launches queued hydrations to fill any
+    freed slots. 5 seconds is deliberately coarse — hydrations run for
+    minutes, so there's no need to poll tightly.
+    """
+    while True:
+        await asyncio.sleep(5)
+        async with _lock:
+            _active[:] = [p for p in _active if p.poll() is None]
+            while _queue and len(_active) < MAX_CONCURRENT_HYDRATIONS:
+                lga = _queue.pop(0)
+                log.info(f"Starting queued hydration for LGA {lga['id']} ({len(_active)+1}/{MAX_CONCURRENT_HYDRATIONS} active, {len(_queue)} still queued)")
+                _active.append(_launch(lga['id']))
+
+
+@app.on_event("startup")
+async def _start_queue_drainer():
+    asyncio.create_task(_drain_queue_loop())
 
 
 def build_csv(rows: list[dict]) -> str:
@@ -202,6 +258,8 @@ async def new_territory(request: Request):
     if not record or "id" not in record:
         raise HTTPException(status_code=400, detail="Missing record.id")
 
+    lga_id = record["id"]
+
     # Launched as a genuinely separate OS process, not a background thread.
     # Playwright's sync API (used throughout scraper.py) cannot coexist with
     # an asyncio event loop anywhere in the same process — and this whole
@@ -211,20 +269,23 @@ async def new_territory(request: Request):
     # A subprocess has its own separate interpreter and no such loop, so it
     # behaves exactly like running this file's own --lga-id CLI mode by hand
     # from a terminal — which already works correctly.
-    # stdout/stderr deliberately NOT redirected to DEVNULL — leaving them
-    # inherited from this process means the subprocess's own log lines
-    # (cookie slot claims, scrape progress, etc.) still show up in Railway's
-    # log viewer exactly as before, just tagged as a separate process.
-    subprocess.Popen(
-        [sys.executable, os.path.abspath(__file__), "--lga-id", str(record["id"])],
-    )
+    async with _lock:
+        _active[:] = [p for p in _active if p.poll() is None]
+        if len(_active) < MAX_CONCURRENT_HYDRATIONS:
+            _active.append(_launch(lga_id))
+            status = "hydration_started"
+            log.info(f"Started hydration for LGA {lga_id} immediately ({len(_active)}/{MAX_CONCURRENT_HYDRATIONS} active)")
+        else:
+            _queue.append(record)
+            status = "hydration_queued"
+            log.info(f"Queued hydration for LGA {lga_id} — {MAX_CONCURRENT_HYDRATIONS} already running, position {len(_queue)} in queue")
 
-    return {"status": "hydration_started", "lga_id": record["id"]}
+    return {"status": status, "lga_id": lga_id, "active": len(_active), "queued": len(_queue)}
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "active_hydrations": len(_active), "queued_hydrations": len(_queue), "max_concurrent": MAX_CONCURRENT_HYDRATIONS}
 
 
 # ── CLI — manual trigger, no webhook/Railway needed ──────────────────────────
@@ -235,14 +296,14 @@ def health():
 #
 # Runs in the foreground (not backgrounded like the webhook does) so you can
 # watch it work and see the email send confirmation before moving to the
-# next one. Run these ONE AT A TIME, sequentially — the cookie pool isn't
-# necessarily safe for multiple concurrent scrapes hitting it at once, and
-# with 30 fresh cookies you don't want to risk burning them on a race.
+# next one. This CLI mode bypasses the queue entirely — it's a direct manual
+# trigger, same as always. Run these ONE AT A TIME, sequentially, yourself,
+# same caution as before — the queue only protects the webhook path.
 if __name__ == "__main__":
     import argparse
     import sys
 
-    parser = argparse.ArgumentParser(description="Manually hydrate one LGA (bypasses the webhook)")
+    parser = argparse.ArgumentParser(description="Manually hydrate one LGA (bypasses the webhook and the queue)")
     parser.add_argument("--lga-id", type=int, required=True)
     args = parser.parse_args()
 
