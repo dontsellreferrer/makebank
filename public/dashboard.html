@@ -49,11 +49,14 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
 .hero-range{display:inline-block;margin-top:10px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--orange);background:rgba(246,132,8,0.12);padding:4px 10px;border-radius:999px;}
 
 /* HERO STATS */
-.hero-stats{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:16px;}
-@media(min-width:640px){.hero-stats{grid-template-columns:repeat(5,1fr);}}
-.hero-stat{background:rgba(255,255,255,0.06);border:.5px solid rgba(255,255,255,0.12);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;}
-.hero-stat-num{font-family:'Poppins',sans-serif;font-size:26px;font-weight:700;color:var(--white);letter-spacing:-0.5px;line-height:1;margin-bottom:4px;}
-.hero-stat-lbl{font-size:10px;font-weight:700;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:0.5px;}
+.hero-stats{display:flex;flex-direction:column;gap:8px;margin-top:16px;}
+@media(min-width:640px){.hero-stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;}}
+.hero-stat{background:rgba(255,255,255,0.06);border:.5px solid rgba(255,255,255,0.12);border-radius:10px;padding:12px 14px;display:flex;align-items:baseline;gap:10px;}
+@media(min-width:640px){.hero-stat{flex-direction:column;align-items:flex-start;gap:0;}}
+.hero-stat-num{font-family:'Poppins',sans-serif;font-size:22px;font-weight:700;color:var(--white);letter-spacing:-0.5px;line-height:1;flex-shrink:0;}
+@media(min-width:640px){.hero-stat-num{font-size:26px;margin-bottom:4px;}}
+.hero-stat-lbl{font-size:11px;font-weight:700;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:0.5px;}
+@media(min-width:640px){.hero-stat-lbl{font-size:10px;}}
 
 /* WINDOW SELECTOR — the single global toggle driving hero/hotlist/leaderboard together */
 .window-selector{display:flex;flex-wrap:wrap;gap:6px;margin-top:18px;}
@@ -66,21 +69,17 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
 .window-btn.locked:hover{background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.6);}
 
 /* STAT GRID */
-.stat-grid{display:flex;flex-direction:column;gap:8px;padding:16px 24px;background:var(--white);border-bottom:1px solid var(--border);}
-@media(min-width:640px){.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}}
-.stat{background:var(--off);border:.5px solid var(--border);border-radius:10px;padding:12px 14px;cursor:pointer;position:relative;overflow:hidden;transition:border-color 0.15s;display:flex;align-items:center;justify-content:space-between;gap:10px;}
-.stat-main{display:flex;align-items:baseline;gap:8px;min-width:0;}
-@media(min-width:640px){.stat{flex-direction:column;align-items:flex-start;padding:12px 10px 10px;}.stat-main{flex-direction:column;align-items:flex-start;gap:3px;}}
+.stat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:16px 24px;background:var(--white);border-bottom:1px solid var(--border);}
+@media(min-width:640px){.stat-grid{grid-template-columns:repeat(4,1fr);}}
+.stat{background:var(--off);border:.5px solid var(--border);border-radius:10px;padding:12px 10px 10px;cursor:pointer;position:relative;overflow:hidden;transition:border-color 0.15s;}
+.stat-main{display:flex;flex-direction:column;align-items:flex-start;}
 .stat::after{content:'';position:absolute;top:0;left:0;right:0;height:2.5px;background:transparent;transition:background 0.15s;}
 .stat.active{border-color:var(--orange);}
 .stat.active::after{background:var(--orange);}
-.stat-num{font-family:'Poppins',sans-serif;font-size:20px;font-weight:700;color:var(--text);letter-spacing:-0.5px;line-height:1;flex-shrink:0;}
-@media(min-width:640px){.stat-num{font-size:22px;margin-bottom:3px;}}
+.stat-num{font-family:'Poppins',sans-serif;font-size:22px;font-weight:700;color:var(--text);letter-spacing:-0.5px;line-height:1;margin-bottom:3px;}
 .stat.active .stat-num{color:var(--orange);}
-.stat-lbl{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-@media(min-width:640px){.stat-lbl{font-size:9px;white-space:normal;}}
-.stat-badge{display:inline-block;font-size:9px;font-weight:600;padding:1px 6px;border-radius:999px;flex-shrink:0;}
-@media(min-width:640px){.stat-badge{margin-top:4px;}}
+.stat-lbl{font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;line-height:1.3;}
+.stat-badge{display:inline-block;font-size:9px;font-weight:600;padding:1px 6px;border-radius:999px;margin-top:4px;}
 .badge-green{background:var(--green-dim);color:var(--green);}
 .badge-red{background:var(--red-dim);color:var(--red);}
 .badge-amber{background:var(--amber-dim);color:var(--amber);}
@@ -200,13 +199,13 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
   <div class="hero-stats" id="hero-stats"></div>
 </div>
 
-<div class="stat-grid" id="stat-grid">
-  <div class="loading"><span class="spinner"></span>Loading...</div>
-</div>
-
 <div class="main-tabs" id="main-tabs">
   <button class="main-tab active" onclick="setMainTab('hotlists',this)">Hot Lists</button>
   <button class="main-tab" onclick="setMainTab('leaderboards',this)">Leaderboards</button>
+</div>
+
+<div class="stat-grid" id="stat-grid">
+  <div class="loading"><span class="spinner"></span>Loading...</div>
 </div>
 
 <div class="layout-single" id="layout">
@@ -429,18 +428,7 @@ function setMainTab(tab, btn) {
   mainTab = tab;
   document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
-  renderContent();
-}
-function setHotlistSel(key, btn) {
-  hotlistSel = key;
-  document.querySelectorAll('#sub-tabs .sub-tab').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  renderContent();
-}
-function setLbSel(key, btn) {
-  lbSel = key;
-  document.querySelectorAll('#sub-tabs .sub-tab').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
+  renderStatGrid();
   renderContent();
 }
 function selectHotlist(key) {
@@ -448,6 +436,16 @@ function selectHotlist(key) {
   hotlistSel = key;
   document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
   document.getElementById('main-tabs').children[0].classList.add('active');
+  renderStatGrid();
+  renderContent();
+  scrollTo('content-section');
+}
+function selectLeaderboard(key) {
+  mainTab = 'leaderboards';
+  lbSel = key;
+  document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
+  document.getElementById('main-tabs').children[1].classList.add('active');
+  renderStatGrid();
   renderContent();
   scrollTo('content-section');
 }
@@ -466,17 +464,10 @@ function getLbRows() {
 }
 
 function renderContent() {
-  const subTabs = document.getElementById('sub-tabs');
   const titleEl = document.getElementById('content-title');
   const countEl = document.getElementById('content-count');
   const bodyEl = document.getElementById('content-body');
   const cache = WINDOW_CACHE[currentWindow] || { rns: [] };
-
-  // Keep the stat-grid cards in sync with whichever Hot List is selected
-  document.querySelectorAll('.stat-grid .stat').forEach(el => el.classList.remove('active'));
-  if (mainTab === 'hotlists') {
-    document.getElementById(`hs-${hotlistSel}`)?.classList.add('active');
-  }
 
   const HOTLIST_TABS = [
     { key: 'rns',      label: `Removed – Not Sold (${windowLabel(currentWindow)})` },
@@ -486,10 +477,6 @@ function renderContent() {
   ];
 
   if (mainTab === 'hotlists') {
-    subTabs.innerHTML = HOTLIST_TABS.map(t =>
-      `<button class="sub-tab ${t.key === hotlistSel ? 'active' : ''}" onclick="setHotlistSel('${t.key}',this)">${t.label}</button>`
-    ).join('');
-
     const expiredData = currentWindow === 'daily' ? (SNAPSHOT.expiredToday || []) : (SNAPSHOT.expiredAll || []);
     const map = {
       rns:      { data: cache.rns || [],              dot: 'red',   pills: () => pill('Withdrawn', 'red') + pill('Call Owner', 'orange'), empty: `Nothing withdrawn ${windowLabel(currentWindow).toLowerCase()} — clean sheet.` },
@@ -506,10 +493,6 @@ function renderContent() {
       : map.data.map((l, i) => rowHtml(l, i, map.pills(l))).join('');
 
   } else {
-    subTabs.innerHTML = LB_TABS.map(t =>
-      `<button class="sub-tab ${t.key === lbSel ? 'active' : ''}" onclick="setLbSel('${t.key}',this)">${t.label}</button>`
-    ).join('');
-
     const { rows, total, view } = getLbRows();
     const max = rows[0]?.count || 1;
     const tab = LB_TABS.find(t => t.key === lbSel);
@@ -585,7 +568,7 @@ async function selectWindow(win) {
   document.getElementById('hero-sub').textContent = 'Loading…';
   const data = await fetchWindowData(win);
   renderHero(data);
-  renderStatGrid(data);
+  renderStatGrid();
   renderShellAndContent();
 }
 
@@ -632,22 +615,45 @@ function renderHero(data) {
     </div>`;
 }
 
-function renderStatGrid(data) {
+function renderStatGrid() {
+  const cache = WINDOW_CACHE[currentWindow] || { rns: [], listed: { agency: [], agent: [], total: 0 }, sold: { agency: [], agent: [], total: 0 } };
+
+  if (mainTab === 'leaderboards') {
+    document.getElementById('stat-grid').innerHTML = `
+      <div class="stat ${lbSel === 'agency_listed' ? 'active' : ''}" id="hs-agency_listed" onclick="selectLeaderboard('agency_listed')">
+        <div class="stat-main"><span class="stat-num">${cache.listed.agency.length}</span><span class="stat-lbl">Agency Listings</span></div>
+        <div class="stat-badge badge-orange">${cache.listed.total} total</div>
+      </div>
+      <div class="stat ${lbSel === 'agent_listed' ? 'active' : ''}" id="hs-agent_listed" onclick="selectLeaderboard('agent_listed')">
+        <div class="stat-main"><span class="stat-num">${cache.listed.agent.length}</span><span class="stat-lbl">Agent Listings</span></div>
+        <div class="stat-badge badge-orange">${cache.listed.total} total</div>
+      </div>
+      <div class="stat ${lbSel === 'agency_sold' ? 'active' : ''}" id="hs-agency_sold" onclick="selectLeaderboard('agency_sold')">
+        <div class="stat-main"><span class="stat-num">${cache.sold.agency.length}</span><span class="stat-lbl">Agency Sales</span></div>
+        <div class="stat-badge badge-green">${cache.sold.total} total</div>
+      </div>
+      <div class="stat ${lbSel === 'agent_sold' ? 'active' : ''}" id="hs-agent_sold" onclick="selectLeaderboard('agent_sold')">
+        <div class="stat-main"><span class="stat-num">${cache.sold.agent.length}</span><span class="stat-lbl">Agent Sales</span></div>
+        <div class="stat-badge badge-green">${cache.sold.total} total</div>
+      </div>`;
+    return;
+  }
+
   const expiredData = currentWindow === 'daily' ? (SNAPSHOT.expiredToday || []) : (SNAPSHOT.expiredAll || []);
   document.getElementById('stat-grid').innerHTML = `
-    <div class="stat active" id="hs-rns" onclick="selectHotlist('rns')">
-      <div class="stat-main"><span class="stat-num">${data.rns.length}</span><span class="stat-lbl">Hotlist — ${windowLabel(currentWindow)}</span></div>
+    <div class="stat ${hotlistSel === 'rns' ? 'active' : ''}" id="hs-rns" onclick="selectHotlist('rns')">
+      <div class="stat-main"><span class="stat-num">${cache.rns.length}</span><span class="stat-lbl">Hotlist — ${windowLabel(currentWindow)}</span></div>
       <div class="stat-badge badge-red">Withdrawn, Unsold</div>
     </div>
-    <div class="stat" id="hs-expiring" onclick="selectHotlist('expiring')">
+    <div class="stat ${hotlistSel === 'expiring' ? 'active' : ''}" id="hs-expiring" onclick="selectHotlist('expiring')">
       <div class="stat-main"><span class="stat-num">${(SNAPSHOT.expiringSoon || []).length}</span><span class="stat-lbl">Expiring Soon</span></div>
       <div class="stat-badge badge-amber">75–90 Days, All</div>
     </div>
-    <div class="stat" id="hs-expired" onclick="selectHotlist('expired')">
+    <div class="stat ${hotlistSel === 'expired' ? 'active' : ''}" id="hs-expired" onclick="selectHotlist('expired')">
       <div class="stat-main"><span class="stat-num">${expiredData.length}</span><span class="stat-lbl">${currentWindow === 'daily' ? 'Newly Expired' : 'Expired'}</span></div>
       <div class="stat-badge badge-amber">${currentWindow === 'daily' ? '91 Days, Today' : '91+ Days, All'}</div>
     </div>
-    <div class="stat" id="hs-fsbo" onclick="selectHotlist('fsbo')">
+    <div class="stat ${hotlistSel === 'fsbo' ? 'active' : ''}" id="hs-fsbo" onclick="selectHotlist('fsbo')">
       <div class="stat-main"><span class="stat-num">${(SNAPSHOT.fsboAll || []).length}</span><span class="stat-lbl">FSBO</span></div>
       <div class="stat-badge badge-navy">Active, All</div>
     </div>`;
@@ -656,7 +662,6 @@ function renderStatGrid(data) {
 function renderShellAndContent() {
   document.getElementById('layout').innerHTML = `
     <div class="section" id="content-section">
-      <div class="sub-tabs" id="sub-tabs"></div>
       <div class="sec-hdr">
         <div class="sec-title" id="content-title"></div>
         <div class="sec-hdr-right">
