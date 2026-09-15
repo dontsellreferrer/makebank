@@ -3,14 +3,19 @@ import urllib.parse
 def build_daily_email_html(
     lga_name, lga_id, date_str, display_date,
     new_listings, new_sales, hot_leads, expiring_soon, newly_expired, new_fsbo,
-    dashboard_base_url="https://makebank.com.au/daily-brief.html",
+    dashboard_base_url="https://makebank.com.au/dashboard.html",
     logo_url="https://makebank.com.au/assets/makebank-logo-white.png",
     unsubscribe_token=None,
     unsubscribe_base_url="https://makebank.com.au/unsubscribe.html",
     show_cddready_promo=True,  # the only cross-sell in this email right now — deliberately just one, not the whole ecosystem
 ):
-    link = (f"{dashboard_base_url}?date={date_str}"
-            f"&lga={lga_id}&lgaName={urllib.parse.quote(lga_name)}")
+    # NOTE: the unified dashboard (makebank_dashboard.html) doesn't support a
+    # ?date= override the way the old standalone daily-brief.html did — its
+    # 5-window system (WTD/MTD/etc.) is built around "now" throughout, and
+    # retrofitting a historical-date lock across every window boundary is
+    # real, not-yet-done work. So this link is no longer date-locked — it
+    # always opens to current figures, not the day the email was sent.
+    link = f"{dashboard_base_url}?lga={lga_id}&lgaName={urllib.parse.quote(lga_name)}"
     unsubscribe_link = (f"{unsubscribe_base_url}?token={unsubscribe_token}"
                          if unsubscribe_token else "#")
 
@@ -76,7 +81,7 @@ def build_daily_email_html(
         <a href="{link}" style="display:inline-block;padding:14px 30px;font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:700;color:#ffffff;text-decoration:none;">View Full Dashboard &rarr;</a>
       </td>
     </tr></table>
-    <div style="font-family:Arial,Helvetica,sans-serif;font-size:10px;color:#9a9a9a;margin-top:10px;">This link shows {lga_name}&rsquo;s numbers for {display_date} &mdash; not whatever day you open it.</div>
+    <div style="font-family:Arial,Helvetica,sans-serif;font-size:10px;color:#9a9a9a;margin-top:10px;">Opens straight to your Daily view — switch to Week to Date, Last Week, Month to Date, or Last Month once you're in.</div>
   </td></tr>
 {cddready_block}
   <!-- FOOTER -->

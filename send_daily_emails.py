@@ -29,7 +29,7 @@ logging.basicConfig(level=logging.INFO)
 
 RESEND_API_KEY = __import__("os").environ.get("RESEND_API_KEY", "")
 EMAIL_FROM = __import__("os").environ.get("HYDRATE_EMAIL_FROM", "reports@makebank.com.au")
-DASHBOARD_BASE_URL = __import__("os").environ.get("DASHBOARD_BASE_URL", "https://makebank.com.au/daily-brief.html")
+DASHBOARD_BASE_URL = __import__("os").environ.get("DASHBOARD_BASE_URL", "https://makebank.com.au/dashboard.html")
 LOGO_URL = __import__("os").environ.get("LOGO_URL", "https://makebank.com.au/assets/makebank-logo-white.png")
 UNSUBSCRIBE_BASE_URL = __import__("os").environ.get("UNSUBSCRIBE_BASE_URL", "https://makebank.com.au/unsubscribe.html")
 

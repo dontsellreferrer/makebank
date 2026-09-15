@@ -123,15 +123,15 @@ form{padding:48px 0 100px;}
 
   <div class="f-section" style="background:var(--bg-2);border:1px solid var(--hairline-2);border-radius:8px;padding:20px 22px;margin-bottom:32px;">
     <div class="f-section-title" style="margin-bottom:10px;">What to expect early on</div>
-    <p style="font-size:13px;font-weight:300;color:var(--muted);line-height:1.7;margin-bottom:8px;">Your first Daily Brief and Weekly Report will look thinner than a mature territory's &mdash; that's expected, not broken:</p>
+    <p style="font-size:13px;font-weight:300;color:var(--muted);line-height:1.7;margin-bottom:8px;">Free for the first 30 days, then $55/month &mdash; cancel any time before the trial ends and you won&rsquo;t be charged. Your first dashboard will also look thinner than a mature territory's &mdash; that's expected, not broken:</p>
     <ul style="font-size:13px;font-weight:300;color:var(--muted);line-height:1.8;padding-left:18px;">
       <li>Removed-listing detection needs a few consecutive days of tracking before it can catch anything, so the first week or two of hotlists may be incomplete.</li>
-      <li>Month-to-date figures won't be fully reliable until you've completed a full calendar month.</li>
+      <li>Week-to-date and month-to-date figures won't be fully reliable until you've completed a full week or calendar month &mdash; Last Week and Last Month views unlock automatically once you have.</li>
       <li>Hot lists are a starting point for your own research, not a confirmed legal or contractual status &mdash; always verify current exclusive status before contracting the owner. Preliminary listing conversations are fine; listing them while they&rsquo;re still inside an unexpired exclusive agency agreement is not.</li>
     </ul>
   </div>
 
-  <button type="submit" class="btn btn-primary" id="submit-btn">Continue to payment</button>
+  <button type="submit" class="btn btn-primary" id="submit-btn">Start free trial</button>
   <div class="status-msg" id="status-msg"></div>
 </form>
 
@@ -143,10 +143,13 @@ form{padding:48px 0 100px;}
 const CONFIG = {
   supabaseUrl: 'https://axmzkjqywpbhxrvshbkf.supabase.co',
   supabaseKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF4bXpranF5d3BiaHhydnNoYmtmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgzMTI1OTMsImV4cCI6MjA5Mzg4ODU5M30.k2DRavwWm6gtg7qPdEAoNa5uYPhdguyW7ILy6fZ0V9w',
-  // STRIPE SETUP: same $39/month recurring Payment Link used on the pricing
-  // page. This form appends ?client_reference_id=<order id> so the Stripe
-  // webhook (see hydrate_new_territory.py) can match payment back to the
-  // order and territory it created.
+  // STRIPE SETUP: same $55/month recurring Payment Link used on the pricing
+  // page — MUST be configured with a 30-day trial period in Stripe (Payment
+  // Link creation has a "Free trial" option) so the customer isn't charged
+  // until day 30, matching the "free for 30 days" copy shown throughout this
+  // form and the pricing page. This form appends ?client_reference_id=<order
+  // id> so the Stripe webhook (see hydrate_new_territory.py) can match
+  // payment back to the order and territory it created.
   stripePaymentLink: 'https://buy.stripe.com/REPLACE_WITH_YOUR_PAYMENT_LINK',
 };
 
@@ -263,7 +266,7 @@ document.getElementById('order-form').addEventListener('submit', async (e) => {
       status: 'pending_payment',
     }]);
 
-    showStatus('Territory created — redirecting to payment…', true);
+    showStatus('Territory created — redirecting to start your free trial…', true);
 
     // 3. Off to Stripe. client_reference_id lets the webhook tie the
     //    successful payment back to this exact order.
@@ -274,7 +277,7 @@ document.getElementById('order-form').addEventListener('submit', async (e) => {
     console.error(err);
     showStatus(err.message || 'Something went wrong — please try again.', false);
     btn.disabled = false;
-    btn.textContent = 'Continue to payment';
+    btn.textContent = 'Start free trial';
   }
 });
 </script>
