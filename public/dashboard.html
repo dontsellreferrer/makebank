@@ -57,6 +57,35 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
 @media(min-width:640px){.hero-stat-num{font-size:26px;margin-bottom:4px;}}
 .hero-stat-lbl{font-size:11px;font-weight:700;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:0.5px;}
 @media(min-width:640px){.hero-stat-lbl{font-size:10px;}}
+.hero-stat-clickable{cursor:pointer;transition:background 0.15s,border-color 0.15s;}
+.hero-stat-clickable:hover{background:rgba(255,255,255,0.1);border-color:rgba(255,255,255,0.22);}
+
+/* DIRECTORY MODAL — agent/agency list opened from the Active Agencies /
+   Active Agents hero-stat cards. Phone/email are left blank on purpose —
+   no contact enrichment is wired up yet (see planned OpenAI-lookup
+   feature) — this just proves the directory + listings view first. */
+.directory-overlay{display:none;position:fixed;inset:0;background:rgba(10,10,10,0.55);z-index:1000;padding:20px;overflow-y:auto;}
+.directory-overlay.show{display:block;}
+.directory-modal{max-width:720px;margin:0 auto;background:var(--white);border-radius:12px;overflow:hidden;}
+.directory-hdr{background:var(--navy);color:var(--white);padding:18px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;}
+.directory-hdr-title{font-family:'Poppins',sans-serif;font-size:16px;font-weight:700;}
+.directory-hdr-sub{font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px;}
+.directory-close{background:rgba(255,255,255,0.1);border:none;color:var(--white);width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;flex-shrink:0;}
+.directory-list{padding:8px;}
+.dir-row{border-bottom:.5px solid var(--border);}
+.dir-row-main{padding:12px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;}
+.dir-row-main:hover{background:var(--off);}
+.dir-row-name{font-size:13px;font-weight:600;color:var(--text);}
+.dir-row-agency{font-size:11px;color:var(--muted);margin-top:2px;}
+.dir-row-count{font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:var(--orange);background:var(--orange-dim);padding:3px 10px;border-radius:999px;flex-shrink:0;}
+.dir-detail{display:none;padding:0 12px 16px;}
+.dir-detail.show{display:block;}
+.dir-contact{display:flex;gap:16px;flex-wrap:wrap;padding:10px 0 12px;font-size:12px;color:var(--muted);}
+.dir-contact-empty{color:var(--muted);font-style:italic;}
+.dir-listings-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);margin-bottom:6px;}
+.dir-listing-link{display:block;font-size:12px;color:var(--navy);text-decoration:none;padding:6px 0;border-top:.5px solid var(--border);}
+.dir-listing-link:hover{color:var(--orange);}
+
 
 /* WINDOW SELECTOR — the single global toggle driving hero/hotlist/leaderboard together */
 .window-selector{display:flex;flex-wrap:wrap;gap:6px;margin-top:18px;}
@@ -222,6 +251,19 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
   Powered by <a href="https://makebank.com.au">MakeBank</a> · part of the <a href="https://referrer.com.au">referrer.com.au</a> network &mdash; 
   <a href="#">Unsubscribe</a> &middot; 
   <a href="#">Manage preferences</a>
+</div>
+
+<div class="directory-overlay" id="directory-overlay" onclick="if(event.target===this)closeDirectory()">
+  <div class="directory-modal">
+    <div class="directory-hdr">
+      <div>
+        <div class="directory-hdr-title" id="directory-title">Directory</div>
+        <div class="directory-hdr-sub" id="directory-sub"></div>
+      </div>
+      <button class="directory-close" onclick="closeDirectory()">&times;</button>
+    </div>
+    <div class="directory-list" id="directory-list"></div>
+  </div>
 </div>
 <script>
 // ── CONFIG ────────────────────────────────────────────────────────────────────
@@ -609,11 +651,11 @@ function renderHero(data) {
       <div class="hero-stat-num">${SNAPSHOT.totalActive.total ?? '—'}</div>
       <div class="hero-stat-lbl">Total Active</div>
     </div>
-    <div class="hero-stat">
+    <div class="hero-stat hero-stat-clickable" onclick="openDirectory('agency')">
       <div class="hero-stat-num">${SNAPSHOT.totalActive.agency.length}</div>
       <div class="hero-stat-lbl">Active Agencies</div>
     </div>
-    <div class="hero-stat">
+    <div class="hero-stat hero-stat-clickable" onclick="openDirectory('agent')">
       <div class="hero-stat-num">${SNAPSHOT.totalActive.agent.length}</div>
       <div class="hero-stat-lbl">Active Agents</div>
     </div>
@@ -717,7 +759,7 @@ async function load() {
     sb('listings', `lga_id=eq.${lga}&status=eq.active&first_seen=lte.${days90}&select=address,agent,agency,url,first_seen&order=first_seen.asc&limit=500`),
     sb('listings', `lga_id=eq.${lga}&status=eq.active&first_seen=gte.${days90Start}&first_seen=lt.${days90End}&select=address,agent,agency,url,first_seen&order=first_seen.asc&limit=500`),
     sb('listings', `lga_id=eq.${lga}&status=eq.active&${fsboOr}&select=address,agent,agency,url,first_seen&order=first_seen.desc&limit=500`),
-    sb('listings', `lga_id=eq.${lga}&status=eq.active&select=agent,agency&order=agent.asc&limit=5000`),
+    sb('listings', `lga_id=eq.${lga}&status=eq.active&select=address,agent,agency,url&order=agent.asc&limit=5000`),
     sb('listings', `lga_id=eq.${lga}&status=eq.active&select=id`),
   ]);
 
@@ -728,6 +770,7 @@ async function load() {
     expiredAll: expiredAll.data,
     expiredToday: expiredToday.data,
     fsboAll: fsboAll.data,
+    totalActiveRows: totalActiveRows.data,
     totalActive: { agency: tally(totalActiveRows.data, 'agency'), agent: tallyAgent(totalActiveRows.data), total: totalActiveCount.count },
   };
 
@@ -744,6 +787,62 @@ async function load() {
 
 function scrollTo(id) {
   document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ── DIRECTORY MODAL ───────────────────────────────────────────────────────────
+// Opened from the Active Agencies / Active Agents hero-stat cards. Lists
+// every agency or agent currently active in the territory with their
+// current-listing count, expandable to show phone/email (blank for now —
+// no contact enrichment wired up yet) plus a clickable list of their
+// current listings, built from SNAPSHOT.totalActiveRows without a second
+// query — that data's already on the page.
+function openDirectory(kind) {
+  const rows = SNAPSHOT.totalActive[kind]; // already tallied + sorted by count desc
+  const title = kind === 'agency' ? 'Active Agencies' : 'Active Agents';
+  document.getElementById('directory-title').textContent = title;
+  document.getElementById('directory-sub').textContent = `${rows.length} ${kind === 'agency' ? 'agencies' : 'agents'} — ${CONFIG.lgaName}`;
+
+  document.getElementById('directory-list').innerHTML = rows.map((r, i) => {
+    const name = kind === 'agency' ? r.agency : r.agent;
+    const sub  = kind === 'agent' ? r.agency : '';
+    return `
+      <div class="dir-row">
+        <div class="dir-row-main" onclick="toggleDirRow(${i}, '${kind}')">
+          <div>
+            <div class="dir-row-name">${name || '—'}</div>
+            ${sub ? `<div class="dir-row-agency">${sub}</div>` : ''}
+          </div>
+          <div class="dir-row-count">${r.count} listing${r.count === 1 ? '' : 's'}</div>
+        </div>
+        <div class="dir-detail" id="dir-detail-${kind}-${i}"></div>
+      </div>`;
+  }).join('');
+
+  document.getElementById('directory-overlay').classList.add('show');
+}
+
+function closeDirectory() {
+  document.getElementById('directory-overlay').classList.remove('show');
+}
+
+function toggleDirRow(i, kind) {
+  const el = document.getElementById(`dir-detail-${kind}-${i}`);
+  const alreadyOpen = el.classList.contains('show');
+  document.querySelectorAll('.dir-detail.show').forEach(d => d.classList.remove('show'));
+  if (alreadyOpen) return;
+
+  const r = SNAPSHOT.totalActive[kind][i];
+  const name = kind === 'agency' ? r.agency : r.agent;
+  const listings = (SNAPSHOT.totalActiveRows || []).filter(l =>
+    kind === 'agency' ? l.agency === name : l.agent === name
+  );
+
+  el.innerHTML = `
+    <div class="dir-contact"><span class="dir-contact-empty">Phone and email not yet available for this ${kind}</span></div>
+    <div class="dir-listings-title">Current Listings (${listings.length})</div>
+    ${listings.map(l => `<a class="dir-listing-link" href="${l.url || '#'}" target="_blank">${l.address || l.url || 'Listing'}</a>`).join('')}
+  `;
+  el.classList.add('show');
 }
 
 // ── CSV EXPORT ────────────────────────────────────────────────────────────────
