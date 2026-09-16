@@ -65,8 +65,11 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
 .window-btn{background:rgba(255,255,255,0.08);border:.5px solid rgba(255,255,255,0.14);color:rgba(255,255,255,0.6);font-size:11px;font-weight:600;padding:7px 14px;border-radius:999px;cursor:pointer;font-family:inherit;transition:all 0.12s;white-space:nowrap;flex-shrink:0;}
 .window-btn:hover{background:rgba(255,255,255,0.14);color:var(--white);}
 .window-btn.active{background:var(--orange);border-color:var(--orange);color:var(--white);}
-.window-btn.locked{opacity:0.45;cursor:not-allowed;}
-.window-btn.locked:hover{background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.6);}
+
+/* CAVEAT BANNER — shown instead of blocking access, when a window (Last
+   Week/Last Month) doesn't have a full completed period behind it yet */
+.caveat-banner{display:none;background:var(--amber-dim);border-left:3px solid var(--amber);color:var(--amber);font-size:12px;font-weight:500;line-height:1.5;padding:12px 24px;max-width:1200px;margin:0 auto;}
+.caveat-banner.show{display:block;}
 
 /* STAT GRID */
 .stat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:16px 24px;background:var(--white);border-bottom:1px solid var(--border);}
@@ -192,12 +195,14 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
 
 <div class="hero">
   <div class="hero-eyebrow">MakeBank</div>
-  <div class="hero-title"><span id="hero-title-text">Good morning</span>, <span id="hero-territory">your territory</span></div>
+  <div class="hero-title"><span id="hero-title-text">Good morning</span><span id="hero-title-sep">, </span><span id="hero-territory">your territory</span></div>
   <div class="hero-sub" id="hero-sub">Loading…</div>
   <div class="hero-range" id="hero-range"></div>
   <div class="window-selector" id="window-selector"></div>
   <div class="hero-stats" id="hero-stats"></div>
 </div>
+
+<div class="caveat-banner" id="caveat-banner"></div>
 
 <div class="main-tabs" id="main-tabs">
   <button class="main-tab active" onclick="setMainTab('hotlists',this)">Hot Lists</button>
@@ -556,14 +561,14 @@ async function fetchWindowData(win) {
 }
 
 // ── WINDOW SWITCHING ──────────────────────────────────────────────────────────
+// Last Week / Last Month used to fully block access until one complete period
+// had passed. Changed (16 Sep 2026): the real data is shown either way now —
+// it's just flagged with a caveat banner when the territory doesn't have a
+// full period behind it yet, rather than hidden entirely.
 async function selectWindow(win) {
   currentWindow = win;
   document.querySelectorAll('.window-btn').forEach(b => b.classList.toggle('active', b.dataset.window === win));
-
-  if (!isWindowUnlocked(win)) {
-    renderLockedState(win);
-    return;
-  }
+  renderCaveatBanner(win);
 
   document.getElementById('hero-sub').textContent = 'Loading…';
   const data = await fetchWindowData(win);
@@ -572,18 +577,25 @@ async function selectWindow(win) {
   renderShellAndContent();
 }
 
-function renderLockedState(win) {
+function renderCaveatBanner(win) {
+  const el = document.getElementById('caveat-banner');
+  if (isWindowUnlocked(win)) {
+    el.classList.remove('show');
+    el.innerHTML = '';
+    return;
+  }
   const ud = unlockDate(win);
-  const msg = `${windowLabel(win)} isn't available yet for ${CONFIG.lgaName} — it needs one full completed period of tracking first. Check back ${ud ? 'around ' + fmtShort(ud) : 'soon'}.`;
-  document.getElementById('hero-sub').textContent = msg;
-  document.getElementById('hero-title-text').textContent = windowLabel(win);
-  document.getElementById('hero-stats').innerHTML = '';
-  document.getElementById('stat-grid').innerHTML = '';
-  document.getElementById('layout').innerHTML = `<div class="sec-empty" style="padding:40px 24px;">${msg}</div>`;
+  const period = win === 'last_week' ? 'week' : 'month';
+  el.innerHTML = `&#9888; ${windowLabel(win)} may be incomplete or inaccurate &mdash; ${CONFIG.lgaName} doesn&rsquo;t have a full ${period} of tracking behind it yet. Expected to self-correct ${ud ? 'by ' + fmtShort(ud) : 'soon'}.`;
+  el.classList.add('show');
 }
 
 function renderHero(data) {
   document.getElementById('hero-title-text').textContent = heroTitle(currentWindow);
+  // 'daily' reads "Good morning, Wollongong" (comma); every other window's
+  // title already ends in the connector word "in" — "This week so far, in
+  // Wollongong" wants a space there, not a second comma.
+  document.getElementById('hero-title-sep').textContent = currentWindow === 'daily' ? ', ' : ' ';
   const rnsLabel = { daily: 'withdrawn and still unsold today', wtd: 'withdrawn and still unsold this week so far', last_week: 'withdrawn and still unsold last week', mtd: 'withdrawn and still unsold this month so far', last_month: 'withdrawn and still unsold last month' }[currentWindow];
   document.getElementById('hero-sub').textContent = `${data.rns.length} ${rnsLabel} — ${CONFIG.lgaName}`;
 
@@ -723,8 +735,7 @@ async function load() {
   // A forced break after the 3rd button keeps this a clean 3-then-2 layout
   // on narrow screens instead of an uncontrolled wrap.
   document.getElementById('window-selector').innerHTML = WINDOWS.map((w, i) => {
-    const locked = !isWindowUnlocked(w.key);
-    const btn = `<button class="window-btn ${w.key === currentWindow ? 'active' : ''} ${locked ? 'locked' : ''}" data-window="${w.key}" onclick="selectWindow('${w.key}')" ${locked ? `title="Unlocks once ${CONFIG.lgaName} has a full completed period of tracking"` : ''}>${w.label}${locked ? ' 🔒' : ''}</button>`;
+    const btn = `<button class="window-btn ${w.key === currentWindow ? 'active' : ''}" data-window="${w.key}" onclick="selectWindow('${w.key}')">${w.label}</button>`;
     return i === 2 ? btn + '<div class="window-selector-break"></div>' : btn;
   }).join('');
 
