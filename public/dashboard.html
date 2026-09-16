@@ -389,6 +389,18 @@ function pill(text, colour) {
 function dom(firstSeen) {
   return Math.floor((Date.now() - new Date(firstSeen)) / 86400000);
 }
+// FSBO listings older than ~90 days were dated via the CSV process's tail
+// stamp — "one date safely past 90 days", the same arbitrary date applied
+// to every listing in that batch, not each one's real listing date. Showing
+// it as if it were precise is misleading (this is why the same date repeats
+// across many unrelated rows) — past that threshold, show "90+ days" instead
+// of the fabricated date. Inside 90 days the date is real (either an exact
+// "Added X days ago" badge or a reasonably-close checkpoint estimate).
+function fsboDatePill(firstSeen) {
+  if (!firstSeen) return '';
+  const days = dom(firstSeen);
+  return days >= 90 ? pill('90+ days', 'blue') : pill('Listed ' + fmtShort(firstSeen), 'blue');
+}
 function rowHtml(item, idx, extraPills = '') {
   return `
     <a class="row" href="${item.url || '#'}" target="_blank">
@@ -546,7 +558,7 @@ function renderContent() {
       rns:      { data: cache.rns || [],              dot: 'red',   pills: () => pill('Withdrawn', 'red') + pill('Call Owner', 'orange'), empty: currentWindow === 'daily' ? 'Nothing withdrawn in the past 24 hours — clean sheet.' : `Nothing withdrawn ${windowLabel(currentWindow).toLowerCase()} — clean sheet.` },
       expiring: { data: SNAPSHOT.expiringSoon || [],   dot: 'amber', pills: (l) => pill(dom(l.first_seen) + ' days', 'amber') + pill('Call before expiry', 'orange'), empty: 'No listings approaching 90 days.' },
       expired:  { data: expiredData,                   dot: 'amber', pills: (l) => pill(dom(l.first_seen) + ' days on market', 'amber') + pill('Agreement likely expired', 'red'), empty: currentWindow === 'daily' ? 'Nothing crossed 91 days in the past 24 hours.' : 'No expired listings.' },
-      fsbo:     { data: SNAPSHOT.fsboAll || [],        dot: 'navy',  pills: (l) => pill('Private Sale', 'navy') + (l.first_seen ? pill('Listed ' + fmtShort(l.first_seen), 'blue') : ''), empty: 'No active private listings.' },
+      fsbo:     { data: SNAPSHOT.fsboAll || [],        dot: 'navy',  pills: (l) => pill('Private Sale', 'navy') + fsboDatePill(l.first_seen), empty: 'No active private listings.' },
     }[hotlistSel];
     const tab = HOTLIST_TABS.find(t => t.key === hotlistSel);
 
