@@ -684,6 +684,15 @@ def import_csv(path: str, table: str, lga_id: int, sb: Client):
     inserted = store.insert_new(table, rows)
     log.info(f"Imported {inserted} rows from {path} into {table} ({dated} with a real First Seen date, {inserted - dated} defaulted to today)")
 
+    # A successful listings import IS the "this territory is dated" event —
+    # flip the flag automatically rather than relying on a manual SQL step
+    # afterward (a manual step that got missed once already, letting an
+    # undated territory sit active=true overnight — see 7_lgas_dated_flag.sql).
+    # This is what actually makes the nightly cron safe to run against it.
+    if table == 'listings':
+        sb.table('lgas').update({'dated': True}).eq('id', lga_id).execute()
+        log.info(f"LGA {lga_id} marked dated=true — now eligible for the nightly cron")
+
 # ── Core scrape (single-pass — used directly by hydrate_new_territory.py for
 #    sold hydration; DO NOT change this function's behaviour, only add new
 #    functions alongside it for the phased cron path below) ───────────────────
@@ -989,6 +998,12 @@ def main():
     parser.add_argument('--batch-limit', type=int,
                          help='Phase 2 only: cap how many pending URLs to process this run, '
                               'for staggering a large queue across multiple scheduled batches.')
+    parser.add_argument('--ignore-dated-check', action='store_true',
+                         help='Bypass the dated=true safety filter (see 7_lgas_dated_flag.sql) — '
+                              'only for deliberate manual testing against an undated territory. '
+                              'Never use this in a scheduled/cron run: an undated territory has no '
+                              'real listings baseline yet, so a normal run would stamp first_seen='
+                              'today on everything it finds, silently corrupting the dating.')
     args = parser.parse_args()
 
     sb = get_supabase()
@@ -1017,12 +1032,15 @@ def main():
                     f"anything past 5 concurrent LGAs will just queue and wait for a slot to free up.")
 
     query = sb.table('lgas').select('*').eq('active', True)
+    if not args.ignore_dated_check:
+        query = query.eq('dated', True)
+        log.info("Filtering to active=true AND dated=true (use --ignore-dated-check to bypass for manual testing)")
     if args.lga:
         query = query.in_('id', args.lga)
     lgas = query.execute().data
 
     if not lgas:
-        log.error("No active LGAs found")
+        log.error("No active+dated LGAs found" if not args.ignore_dated_check else "No active LGAs found")
         sys.exit(1)
 
     log.info(f"Running {len(lgas)} LGA(s): {[l['name'] for l in lgas]}")
