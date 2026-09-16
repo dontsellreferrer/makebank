@@ -1,19 +1,43 @@
 #!/usr/bin/env python3
 """
 REA Scraper — single pass, Supabase-backed
+
 Phase 1: requests-based URL collection from search results (fast)
 Phase 2: Playwright detail scrape for each new URL (gets address, agent, agency)
 
 Usage:
     python scraper.py                              # all active LGAs
-    python scraper.py --lga 1                      # specific LGA
-    python scraper.py --lga 1 --max-pages 2        # test run
-    python scraper.py --lga 1 --type listings      # listings only
-    python scraper.py --lga 1 --type sold          # sold only
-    python scraper.py --lga 1 --reconcile-only     # reconcile only
+    python scraper.py --lga 1                       # specific LGA
+    python scraper.py --lga 1 --max-pages 2          # test run
+    python scraper.py --lga 1 --type listings        # listings only
+    python scraper.py --lga 1 --type sold             # sold only
+    python scraper.py --lga 1 --reconcile-only        # reconcile only
     python scraper.py --import-csv Listing.csv --lga 1
-"""
 
+DAILY CRON — --phase 1 / --phase 2 (added 16 Sep 2026)
+    The single-pass behaviour above (run_scrape(), used directly by
+    hydrate_new_territory.py for sold-hydration and left completely
+    unchanged here) does URL collection and detail-scraping back to back
+    for one LGA. That's fine for hydrating one new territory, but the daily
+    cron needs Phase 1 (URL collection, cheap) to run for every active LGA
+    at once, while Phase 2 (detail scraping, ~7-9s per listing — the real
+    cost) is staggered across the following hours so REA never sees a
+    sudden concurrent spike.
+
+    python scraper.py --phase 1 --parallel 5          # midnight: all active LGAs
+    python scraper.py --phase 2                       # drains whatever Phase 1 queued
+    python scraper.py --phase 2 --lga 1 2 3            # ...or just this batch
+    python scraper.py --phase 2 --batch-limit 200      # ...or just this many URLs
+
+    Phase 1 queues newly-found URLs into the `pending_scrape_urls` Supabase
+    table instead of detail-scraping them immediately (see
+    sql/6_pending_scrape_urls.sql) — that's the handoff point. Phase 2 reads
+    from that table, so it can run minutes or hours later, in batches, and
+    even from a different VM, without needing to know anything about what
+    Phase 1 did beyond what's sitting in that table. Removals and
+    reactivations don't need a detail-page visit, so Phase 1 still applies
+    those immediately, same as the single-pass version always has.
+"""
 import os, re, sys, csv, json, time, random, argparse, logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
@@ -30,7 +54,7 @@ load_dotenv()
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s  %(levelname)-7s  %(message)s',
+    format='%(asctime)s %(levelname)-7s %(message)s',
     datefmt='%H:%M:%S',
     handlers=[
         logging.StreamHandler(sys.stdout),
@@ -41,10 +65,9 @@ log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 COOKIES_FILE = os.getenv('COOKIES_FILE', 'cookies.json')
-DELAY_MIN    = float(os.getenv('DELAY_MIN', '1.0'))
-DELAY_MAX    = float(os.getenv('DELAY_MAX', '3.0'))
-MAX_PAGES    = int(os.getenv('MAX_PAGES')) if os.getenv('MAX_PAGES') else None
-
+DELAY_MIN = float(os.getenv('DELAY_MIN', '1.0'))
+DELAY_MAX = float(os.getenv('DELAY_MAX', '3.0'))
+MAX_PAGES = int(os.getenv('MAX_PAGES')) if os.getenv('MAX_PAGES') else None
 
 # ── Supabase ──────────────────────────────────────────────────────────────────
 def get_supabase() -> Client:
@@ -54,14 +77,12 @@ def get_supabase() -> Client:
         raise EnvironmentError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in .env")
     return create_client(url, key)
 
-
 # ── Cookie slot coordination ──────────────────────────────────────────────────
 # See cookie_slots_schema.sql. Both the cron's own --parallel dispatch and
 # webhook-triggered hydrations claim slots through this same mechanism, so
 # they can safely coexist even if they happen to run at the same moment —
 # neither one has to assume it's the only thing using cookies right now.
 import time as _time  # local alias — module-level `time` may already be imported elsewhere
-
 
 def claim_cookie_slot(sb: Client, runner: str, max_wait_seconds: int = 300, poll_seconds: int = 5) -> int:
     """Blocks until a slot is free (or max_wait_seconds elapses), returns the
@@ -79,11 +100,9 @@ def claim_cookie_slot(sb: Client, runner: str, max_wait_seconds: int = 300, poll
         waited += poll_seconds
     raise RuntimeError(f"{runner}: no cookie slot became free within {max_wait_seconds}s")
 
-
 def release_cookie_slot(sb: Client, slot: int, runner: str):
     sb.rpc('release_cookie_slot', {'idx': slot}).execute()
     log.info(f"{runner}: released cookie slot {slot}")
-
 
 # ── Cookie pool ───────────────────────────────────────────────────────────────
 class CookiePool:
@@ -96,7 +115,7 @@ class CookiePool:
         ever did) but nothing currently calls this with those set.
         """
         self.cookies: list[str] = []
-        self.agents:  list[str] = []
+        self.agents: list[str] = []
         self._index = 0
         self.burned_count = 0
 
@@ -113,8 +132,8 @@ class CookiePool:
                 raise RuntimeError(f"Slot {slot_index} of {slots_total} has no cookies — pool too small to partition this way.")
             log.info(f"Cookie pool: using slot {slot_index}/{slots_total} ({len(data)} cookies)")
 
-        self.cookies = [d['cookie']     for d in data if 'cookie'     in d]
-        self.agents  = [d['user_agent'] for d in data if 'user_agent' in d]
+        self.cookies = [d['cookie'] for d in data if 'cookie' in d]
+        self.agents = [d['user_agent'] for d in data if 'user_agent' in d]
         log.info(f"Loaded {len(self.cookies)} cookie(s)")
 
     def _load_from_supabase(self) -> list:
@@ -166,23 +185,22 @@ class CookiePool:
     def reload(self):
         data = self._load_from_supabase()
         if data:
-            self.cookies = [d['cookie']     for d in data if 'cookie'     in d]
-            self.agents  = [d['user_agent'] for d in data if 'user_agent' in d]
-            self._index  = 0
+            self.cookies = [d['cookie'] for d in data if 'cookie' in d]
+            self.agents = [d['user_agent'] for d in data if 'user_agent' in d]
+            self._index = 0
             log.info(f"Cookie pool reloaded: {len(self.cookies)} slots")
-
 
 # ── Phase 1: URL collection via Playwright ───────────────────────────────────────────
 class URLCollector:
     def __init__(self, pool: CookiePool, max_pages=None):
-        self.pool      = pool
+        self.pool = pool
         self.max_pages = max_pages
-        self._browser  = None
-        self._pw       = None
+        self._browser = None
+        self._pw = None
 
     def _start_browser(self):
         from playwright.sync_api import sync_playwright
-        self._pw      = sync_playwright().start()
+        self._pw = sync_playwright().start()
         self._browser = self._pw.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox",
@@ -213,10 +231,11 @@ class URLCollector:
         for attempt in range(retries):
             if self.pool.empty:
                 return None
-            idx        = random.randrange(len(self.pool.cookies))
+            idx = random.randrange(len(self.pool.cookies))
             cookie_str = self.pool.cookies[idx]
             user_agent = self.pool.agents[idx]
-            ctx        = self._browser.new_context(
+
+            ctx = self._browser.new_context(
                 user_agent=user_agent,
                 viewport={"width": 1366, "height": 768},
                 locale="en-AU",
@@ -224,6 +243,7 @@ class URLCollector:
             )
             ctx.add_cookies(self._parse_cookies(cookie_str))
             page = ctx.new_page()
+
             try:
                 response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 if response and response.status == 429:
@@ -288,7 +308,6 @@ class URLCollector:
             r'dateSold.{0,80}?(\d{1,2} [A-Za-z]+ \d{4})',
             script.string
         )
-
         for date_str in dates_found:
             for fmt in ('%d %B %Y', '%d %b %Y'):
                 try:
@@ -305,38 +324,46 @@ class URLCollector:
             raise ValueError("base_url must contain 'list-1'")
         if known_urls is None:
             known_urls = set()
+
         self._start_browser()
         try:
             total = self.get_total_pages(base_url)
             if self.max_pages:
                 total = min(total, self.max_pages)
             log.info(f"Pages to collect: up to {total}")
+
             url_template = base_url.replace('list-1', 'list-{}')
             all_live_urls = []
-            new_urls      = []
+            new_urls = []
+
             for page in range(1, total + 1):
                 page_url = url_template.format(page)
                 log.info(f"  Page {page}/{total}")
                 soup = self._get_soup(page_url)
                 if not soup:
                     continue
+
                 found = ['https://www.realestate.com.au' + a.get('href')
                          for a in soup.select('h2.residential-card__address-heading > a')]
                 page_new = [u for u in found if u not in known_urls]
-                log.info(f"  Found {len(found)} URLs ({len(page_new)} new)")
+                log.info(f"    Found {len(found)} URLs ({len(page_new)} new)")
+
                 all_live_urls.extend(found)
                 new_urls.extend(page_new)
+
                 if sold_cutoff_days > 0 and self._page_has_old_sold(soup, sold_cutoff_days):
                     log.info(f"  Reached {sold_cutoff_days}-day cutoff — stopping")
                     break
+
                 time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+
             log.info(f"Total URLs collected: {len(all_live_urls)} ({len(new_urls)} new)")
         finally:
             self._stop_browser()
+
         # Store all live URLs on self so run_scrape can compute removals
         self._last_all_live_urls = set(all_live_urls)
         return new_urls
-
 
 # ── Phase 2: Detail scrape via Playwright ─────────────────────────────────────
 ROTATE_EVERY = 1  # New browser context every page — full cookie rotation
@@ -363,7 +390,7 @@ def scrape_details_playwright(urls: list[str], pool: CookiePool) -> list[dict]:
 
         def new_context():
             # Random cookie selection — new context per listing
-            idx        = random.randrange(len(pool.cookies))
+            idx = random.randrange(len(pool.cookies))
             cookie_str = pool.cookies[idx]
             user_agent = pool.agents[idx]
             ctx = browser.new_context(
@@ -377,7 +404,6 @@ def scrape_details_playwright(urls: list[str], pool: CookiePool) -> list[dict]:
 
         for i, url in enumerate(urls, 1):
             context, page = new_context()
-
             log.info(f"  [{i}/{len(urls)}] {url}")
             try:
                 page.goto(url, wait_until='domcontentloaded', timeout=30000)
@@ -401,7 +427,6 @@ def scrape_details_playwright(urls: list[str], pool: CookiePool) -> list[dict]:
         browser.close()
 
     return results
-
 
 def parse_detail(html: str, url: str) -> Optional[dict]:
     """Parse address/agent/agency from rendered HTML."""
@@ -453,7 +478,6 @@ def parse_detail(html: str, url: str) -> Optional[dict]:
                     break
         except Exception:
             pass
-
     if not agency:
         try:
             tag = soup.select_one('[class*="NonLink"]')
@@ -476,18 +500,17 @@ def parse_detail(html: str, url: str) -> Optional[dict]:
                             break
                         except ValueError:
                             continue
-                if sold_date:
-                    break
+                    if sold_date:
+                        break
     except Exception:
         pass
 
     return {'address': address, 'agent': agent, 'agency': agency, 'url': url, 'sold_date': sold_date}
 
-
 # ── Supabase store ────────────────────────────────────────────────────────────
 class LGAStore:
     def __init__(self, sb: Client, lga_id: int):
-        self.sb     = sb
+        self.sb = sb
         self.lga_id = lga_id
 
     def get_active_urls(self, table: str) -> set[str]:
@@ -530,16 +553,17 @@ class LGAStore:
             return 0
         now = datetime.now(timezone.utc).isoformat()
         records = [{
-            'lga_id':     self.lga_id,
-            'address':    r['address'],
-            'agent':      r['agent'],
-            'agency':     r['agency'],
-            'url':        r['url'],
-            'status':     'active',
+            'lga_id': self.lga_id,
+            'address': r['address'],
+            'agent': r['agent'],
+            'agency': r['agency'],
+            'url': r['url'],
+            'status': 'active',
             'first_seen': r.get('first_seen') or now,  # CSV import can supply a real historical date; normal scrapes always omit it and get now
-            'last_seen':  now,
+            'last_seen': now,
             **({'sold_date': r['sold_date']} if r.get('sold_date') else {}),
         } for r in rows]
+
         inserted = 0
         for i in range(0, len(records), 500):
             chunk = records[i:i+500]
@@ -556,12 +580,12 @@ class LGAStore:
         for i in range(0, len(url_list), 100):
             chunk = url_list[i:i+100]
             self.sb.table(table).update({
-                'status':     'removed',
+                'status': 'removed',
                 'removed_at': now,
-                'last_seen':  now,
+                'last_seen': now,
             }).in_('url', chunk).execute()
             updated += len(chunk)
-            log.info(f"  Marked removed: {updated}/{len(url_list)}")
+        log.info(f"  Marked removed: {updated}/{len(url_list)}")
         return updated
 
     def delete_urls(self, table: str, urls: set[str]) -> int:
@@ -576,7 +600,7 @@ class LGAStore:
             chunk = url_list[i:i+100]
             self.sb.table(table).delete().eq('lga_id', self.lga_id).in_('url', chunk).execute()
             deleted += len(chunk)
-            log.info(f"  Deleted: {deleted}/{len(url_list)}")
+        log.info(f"  Deleted: {deleted}/{len(url_list)}")
         return deleted
 
     def get_removed_urls(self, table: str = 'listings') -> set[str]:
@@ -609,9 +633,9 @@ class LGAStore:
         for i in range(0, len(url_list), 100):
             chunk = url_list[i:i+100]
             self.sb.table(table).update({
-                'status':     'active',
+                'status': 'active',
                 'removed_at': None,
-                'last_seen':  now,
+                'last_seen': now,
             }).eq('lga_id', self.lga_id).in_('url', chunk).execute()
             reactivated += len(chunk)
         return reactivated
@@ -621,16 +645,15 @@ class LGAStore:
 
     def log_run(self, run_type, new_count, removed_count, updated_count, status, error_msg, duration_secs):
         self.sb.table('runs').insert({
-            'lga_id':        self.lga_id,
-            'run_type':      run_type,
-            'new_count':     new_count,
+            'lga_id': self.lga_id,
+            'run_type': run_type,
+            'new_count': new_count,
             'removed_count': removed_count,
             'updated_count': updated_count,
-            'status':        status,
-            'error_msg':     error_msg,
+            'status': status,
+            'error_msg': error_msg,
             'duration_secs': round(duration_secs, 1),
         }).execute()
-
 
 # ── Import CSV ────────────────────────────────────────────────────────────────
 def import_csv(path: str, table: str, lga_id: int, sb: Client):
@@ -653,34 +676,36 @@ def import_csv(path: str, table: str, lga_id: int, sb: Client):
                     log.warning(f"Could not parse First Seen '{raw}' for {row.get('URL')} — falling back to today's date")
             rows.append({
                 'address': row.get('Address', ''),
-                'agent':   row.get('Agent', ''),
-                'agency':  row.get('Agency', ''),
-                'url':     row.get('URL', ''),
+                'agent': row.get('Agent', ''),
+                'agency': row.get('Agency', ''),
+                'url': row.get('URL', ''),
                 **({'first_seen': first_seen} if first_seen else {}),
             })
     inserted = store.insert_new(table, rows)
     log.info(f"Imported {inserted} rows from {path} into {table} ({dated} with a real First Seen date, {inserted - dated} defaulted to today)")
 
-
-# ── Core scrape ───────────────────────────────────────────────────────────────
+# ── Core scrape (single-pass — used directly by hydrate_new_territory.py for
+#    sold hydration; DO NOT change this function's behaviour, only add new
+#    functions alongside it for the phased cron path below) ───────────────────
 def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages: Optional[int]):
-    lga_id   = lga['id']
+    lga_id = lga['id']
     lga_name = lga['name']
-    table    = 'listings' if run_type == 'listings' else 'sold'
+    table = 'listings' if run_type == 'listings' else 'sold'
     base_url = lga['search_url_listings'] if run_type == 'listings' else lga['search_url_sold']
 
     # Reload cookie pool from Supabase before each scrape type — ensures fresh cookies
     pool.reload()
 
     log.info(f"{'='*60}")
-    log.info(f"LGA: {lga_name} ({lga_id})  |  Type: {run_type}")
+    log.info(f"LGA: {lga_name} ({lga_id}) | Type: {run_type}")
     log.info(f"{'='*60}")
 
-    store     = LGAStore(sb, lga_id)
+    store = LGAStore(sb, lga_id)
     collector = URLCollector(pool, max_pages=max_pages)
-    t_start   = time.time()
+
+    t_start = time.time()
     new_count = removed_count = 0
-    status    = 'ok'
+    status = 'ok'
     error_msg = ''
 
     try:
@@ -690,26 +715,27 @@ def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages
         # were excluded here, it would look "new" to Phase 1 and go through
         # insert_new() below — which sets first_seen = now on every row,
         # silently wiping the listing's real first_seen on restoration.
-        known_urls   = store.get_all_urls(table)
+        known_urls = store.get_all_urls(table)
         inactive_urls = store.get_inactive_urls(table) if table == 'listings' else set()
         log.info(f"Known URLs in Supabase: {len(known_urls)} ({len(inactive_urls)} currently inactive)")
 
         # Phase 1: Collect URLs — filter known ones per page
         log.info("Phase 1: Collecting URLs...")
-        cutoff    = 30 if run_type == 'sold' else 0
+        cutoff = 30 if run_type == 'sold' else 0
         live_urls = set(collector.collect_urls(base_url, sold_cutoff_days=cutoff, known_urls=known_urls))
         log.info(f"Live URLs: {len(live_urls)}")
 
-        new_urls        = set(live_urls)  # collect_urls already filtered known ones — genuinely new URLs only
+        new_urls = set(live_urls)  # collect_urls already filtered known ones — genuinely new URLs only
+
         # Only ACTIVE known URLs that disappeared count as a fresh removal.
         # Excluding already-inactive URLs here matters: without it, a listing
         # gone for weeks would get re-marked 'removed' (and removed_at
         # refreshed to today) on every single run, permanently corrupting the
         # daily/weekly "removed today" figures.
-        removed_urls     = (known_urls - collector._last_all_live_urls) - inactive_urls
+        removed_urls = (known_urls - collector._last_all_live_urls) - inactive_urls
         reactivated_urls = collector._last_all_live_urls & inactive_urls  # known + inactive + live again = restored
 
-        log.info(f"New: {len(new_urls)}  |  Removed: {len(removed_urls)}  |  Reactivated: {len(reactivated_urls)}")
+        log.info(f"New: {len(new_urls)} | Removed: {len(removed_urls)} | Reactivated: {len(reactivated_urls)}")
 
         # ── Safety check ─────────────────────────────────────────────────────
         # If Phase 1 collected zero or very few URLs vs what we know exists,
@@ -727,7 +753,7 @@ def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages
         # Phase 2: Playwright detail scrape for new URLs only
         if new_urls:
             log.info(f"Phase 2: Playwright scraping {len(new_urls)} new listings...")
-            new_rows  = scrape_details_playwright(list(new_urls), pool)
+            new_rows = scrape_details_playwright(list(new_urls), pool)
             new_count = store.insert_new(table, new_rows)
             log.info(f"Inserted {new_count} new rows")
         else:
@@ -752,7 +778,7 @@ def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages
             log.info("No removals")
 
     except Exception as e:
-        status    = 'error'
+        status = 'error'
         error_msg = str(e)
         log.error(f"Run failed: {e}", exc_info=True)
 
@@ -761,6 +787,156 @@ def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages
     log.info(f"Complete in {duration:.1f}s — new:{new_count} removed:{removed_count}")
     return status
 
+# ── Phased scrape (daily cron — added 16 Sep 2026) ────────────────────────────
+def run_scrape_phase1(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages: Optional[int]):
+    """URL collection + delta detection only. Removals/reactivations are
+    applied immediately (no detail-page visit needed for those). Newly-found
+    URLs are queued into pending_scrape_urls for Phase 2 to detail-scrape
+    later, instead of being scraped right here — that's what lets this run
+    for every active LGA at once without the per-listing detail-scrape cost."""
+    lga_id = lga['id']
+    lga_name = lga['name']
+    table = 'listings' if run_type == 'listings' else 'sold'
+    base_url = lga['search_url_listings'] if run_type == 'listings' else lga['search_url_sold']
+
+    pool.reload()
+    log.info(f"{'='*60}")
+    log.info(f"PHASE 1: {lga_name} ({lga_id}) | Type: {run_type}")
+    log.info(f"{'='*60}")
+
+    store = LGAStore(sb, lga_id)
+    collector = URLCollector(pool, max_pages=max_pages)
+
+    t_start = time.time()
+    queued_count = removed_count = 0
+    status = 'ok'
+    error_msg = ''
+
+    try:
+        known_urls = store.get_all_urls(table)
+        inactive_urls = store.get_inactive_urls(table) if table == 'listings' else set()
+        log.info(f"Known URLs in Supabase: {len(known_urls)} ({len(inactive_urls)} currently inactive)")
+
+        cutoff = 30 if run_type == 'sold' else 0
+        new_urls = set(collector.collect_urls(base_url, sold_cutoff_days=cutoff, known_urls=known_urls))
+
+        removed_urls = (known_urls - collector._last_all_live_urls) - inactive_urls
+        reactivated_urls = collector._last_all_live_urls & inactive_urls
+
+        log.info(f"New: {len(new_urls)} | Removed: {len(removed_urls)} | Reactivated: {len(reactivated_urls)}")
+
+        # Same safety check as the single-pass version — a suspiciously thin
+        # result vs what's already known means something went wrong upstream
+        # (burned cookies, REA blocking, network error), not real removals.
+        all_live_count = len(collector._last_all_live_urls)
+        if known_urls and all_live_count < max(10, len(known_urls) * 0.1):
+            log.error(
+                f"SAFETY ABORT: Phase 1 collected only {all_live_count} URLs "
+                f"vs {len(known_urls)} known. Possible scrape failure — "
+                f"skipping removal step to protect existing data."
+            )
+            removed_urls = set()
+
+        # Queue new URLs for Phase 2 rather than detail-scraping now.
+        if new_urls:
+            rows = [{'lga_id': lga_id, 'run_type': run_type, 'url': u} for u in new_urls]
+            for i in range(0, len(rows), 500):
+                sb.table('pending_scrape_urls').upsert(rows[i:i+500], on_conflict='lga_id,run_type,url').execute()
+            queued_count = len(new_urls)
+            log.info(f"Queued {queued_count} new URL(s) for Phase 2")
+        else:
+            log.info("No new listings")
+
+        if reactivated_urls:
+            log.info(f"Reactivating {len(reactivated_urls)} restored listings...")
+            store.reactivate(table, reactivated_urls)
+
+        if removed_urls:
+            if table == 'sold':
+                log.info(f"Deleting {len(removed_urls)} aged-out sold records...")
+                removed_count = store.delete_urls(table, removed_urls)
+            else:
+                log.info(f"Marking {len(removed_urls)} as removed...")
+                removed_count = store.mark_removed(table, removed_urls)
+        else:
+            log.info("No removals")
+
+    except Exception as e:
+        status = 'error'
+        error_msg = str(e)
+        log.error(f"Phase 1 failed: {e}", exc_info=True)
+
+    duration = time.time() - t_start
+    store.log_run(f'{run_type}_phase1', queued_count, removed_count, 0, status, error_msg, duration)
+    log.info(f"Phase 1 complete in {duration:.1f}s — queued:{queued_count} removed:{removed_count}")
+    return status
+
+
+def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]] = None,
+                       run_type: Optional[str] = None, batch_limit: Optional[int] = None):
+    """Detail-scrapes whatever Phase 1 queued in pending_scrape_urls.
+    Optionally restricted to specific LGA ids (staggered batches), a single
+    run_type, and/or capped to batch_limit URLs for this run. Grouped by
+    (lga_id, run_type) so each group's results land in the right table under
+    the right LGA, and each group gets its own `runs` log entry."""
+    query = sb.table('pending_scrape_urls').select('*')
+    if lga_ids:
+        query = query.in_('lga_id', lga_ids)
+    if run_type:
+        query = query.eq('run_type', run_type)
+    if batch_limit:
+        query = query.limit(batch_limit)
+    pending = query.execute().data
+
+    if not pending:
+        log.info("Phase 2: nothing pending")
+        return
+
+    log.info(f"Phase 2: {len(pending)} pending URL(s) to detail-scrape")
+
+    groups: dict[tuple[int, str], list[dict]] = {}
+    for row in pending:
+        key = (row['lga_id'], row['run_type'])
+        groups.setdefault(key, []).append(row)
+
+    for (lga_id, r_type), rows in groups.items():
+        table = 'listings' if r_type == 'listings' else 'sold'
+        urls = [r['url'] for r in rows]
+        log.info(f"{'='*60}")
+        log.info(f"PHASE 2: LGA {lga_id} | Type: {r_type} | {len(urls)} URL(s)")
+        log.info(f"{'='*60}")
+
+        t_start = time.time()
+        store = LGAStore(sb, lga_id)
+        status = 'ok'
+        error_msg = ''
+        inserted = 0
+
+        try:
+            details = scrape_details_playwright(urls, pool)
+            inserted = store.insert_new(table, details)
+            log.info(f"Inserted {inserted} rows")
+
+            # Only clear pending rows for URLs actually returned by the
+            # detail scrape — if parse_detail() silently dropped one (e.g.
+            # the address selector didn't match), its row stays queued so
+            # it's retried on the next Phase 2 run instead of being lost.
+            scraped_urls = {d['url'] for d in details}
+            done_ids = [r['id'] for r in rows if r['url'] in scraped_urls]
+            leftover = len(rows) - len(done_ids)
+            for i in range(0, len(done_ids), 200):
+                sb.table('pending_scrape_urls').delete().in_('id', done_ids[i:i+200]).execute()
+            if leftover:
+                log.warning(f"{leftover} URL(s) didn't parse — left queued for retry")
+
+        except Exception as e:
+            status = 'error'
+            error_msg = str(e)
+            log.error(f"Phase 2 failed for LGA {lga_id}/{r_type}: {e}", exc_info=True)
+
+        duration = time.time() - t_start
+        store.log_run(f'{r_type}_phase2', inserted, 0, 0, status, error_msg, duration)
+        log.info(f"Phase 2 complete for LGA {lga_id}/{r_type} in {duration:.1f}s")
 
 # ── Reconcile ─────────────────────────────────────────────────────────────────
 def run_reconcile(sb: Client, lga: dict):
@@ -768,19 +944,22 @@ def run_reconcile(sb: Client, lga: dict):
     log.info(f"{'='*60}")
     log.info(f"Reconcile: {lga['name']} ({lga_id})")
     log.info(f"{'='*60}")
+
     t_start = time.time()
-    store   = LGAStore(sb, lga_id)
+    store = LGAStore(sb, lga_id)
 
     removed_listing_urls = store.get_removed_urls('listings')
-    sold_urls_raw        = store.get_sold_urls()
+    sold_urls_raw = store.get_sold_urls()
+
     # Listing URLs don't have /sold/ — normalise sold URLs to match before comparing
-    sold_urls            = {u.replace('realestate.com.au/sold/', 'realestate.com.au/') for u in sold_urls_raw}
-    removed_not_sold     = removed_listing_urls - sold_urls
-    removed_sold         = removed_listing_urls & sold_urls
+    sold_urls = {u.replace('realestate.com.au/sold/', 'realestate.com.au/') for u in sold_urls_raw}
+
+    removed_not_sold = removed_listing_urls - sold_urls
+    removed_sold = removed_listing_urls & sold_urls
 
     log.info(f"Removed from listings: {len(removed_listing_urls)}")
-    log.info(f"  → Confirmed sold:     {len(removed_sold)}")
-    log.info(f"  → Removed NOT sold:   {len(removed_not_sold)}  ← dashboard hot list")
+    log.info(f"  → Confirmed sold: {len(removed_sold)}")
+    log.info(f"  → Removed NOT sold: {len(removed_not_sold)} ← dashboard hot list")
 
     if removed_not_sold:
         url_list = list(removed_not_sold)
@@ -792,18 +971,24 @@ def run_reconcile(sb: Client, lga: dict):
     store.log_run('reconcile', 0, len(removed_not_sold), len(removed_sold), 'ok', '', duration)
     log.info(f"Reconcile complete in {duration:.1f}s")
 
-
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description='REA Scraper')
-    parser.add_argument('--lga',           type=int, nargs='+')
-    parser.add_argument('--type',          choices=['listings', 'sold', 'both'], default='both')
-    parser.add_argument('--max-pages',     type=int)
-    parser.add_argument('--reconcile-only',action='store_true')
-    parser.add_argument('--import-csv',    type=str)
-    parser.add_argument('--import-table',  choices=['listings', 'sold'], default='listings')
-    parser.add_argument('--parallel',      type=int, default=1,
-                        help='Number of LGAs to scrape in parallel (default: 1)')
+    parser.add_argument('--lga', type=int, nargs='+')
+    parser.add_argument('--type', choices=['listings', 'sold', 'both'], default='both')
+    parser.add_argument('--max-pages', type=int)
+    parser.add_argument('--reconcile-only', action='store_true')
+    parser.add_argument('--import-csv', type=str)
+    parser.add_argument('--import-table', choices=['listings', 'sold'], default='listings')
+    parser.add_argument('--parallel', type=int, default=1,
+                         help='Number of LGAs to scrape in parallel (default: 1)')
+    parser.add_argument('--phase', type=int, choices=[1, 2],
+                         help='Split into phase 1 (URL collection/delta, queues new URLs) or '
+                              'phase 2 (detail-scrapes whatever phase 1 queued). Omit for the '
+                              'original single-pass behaviour (collection + detail scrape together).')
+    parser.add_argument('--batch-limit', type=int,
+                         help='Phase 2 only: cap how many pending URLs to process this run, '
+                              'for staggering a large queue across multiple scheduled batches.')
     args = parser.parse_args()
 
     sb = get_supabase()
@@ -812,6 +997,19 @@ def main():
         if not args.lga:
             parser.error("--import-csv requires --lga")
         import_csv(args.import_csv, args.import_table, args.lga[0], sb)
+        return
+
+    # Phase 2 doesn't iterate LGAs the normal way — it just drains whatever
+    # is sitting in pending_scrape_urls, optionally filtered by --lga/--type.
+    if args.phase == 2:
+        pool = CookiePool(COOKIES_FILE)
+        run_scrape_phase2(
+            sb, pool,
+            lga_ids=args.lga,
+            run_type=(None if args.type == 'both' else args.type),
+            batch_limit=args.batch_limit,
+        )
+        log.info("Phase 2 run complete.")
         return
 
     if args.parallel > 5:
@@ -843,6 +1041,17 @@ def main():
         # old sequential/shared-pool approach never doing so. Testing the
         # proven approach rather than the untested one.
         pool = CookiePool(COOKIES_FILE)
+
+        if args.phase == 1:
+            if args.type in ('listings', 'both'):
+                run_scrape_phase1(sb, pool, lga, 'listings', max_pages)
+            if args.type in ('sold', 'both'):
+                run_scrape_phase1(sb, pool, lga, 'sold', max_pages)
+            if args.type == 'both':
+                run_reconcile(sb, lga)
+            return
+
+        # No --phase given: original single-pass behaviour, unchanged.
         if args.type in ('listings', 'both'):
             run_scrape(sb, pool, lga, 'listings', max_pages)
         if args.type in ('sold', 'both'):
@@ -865,7 +1074,6 @@ def main():
             process_lga(lga)
 
     log.info("All LGAs complete.")
-
 
 if __name__ == '__main__':
     main()
