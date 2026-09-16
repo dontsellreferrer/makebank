@@ -546,7 +546,7 @@ function renderContent() {
       rns:      { data: cache.rns || [],              dot: 'red',   pills: () => pill('Withdrawn', 'red') + pill('Call Owner', 'orange'), empty: currentWindow === 'daily' ? 'Nothing withdrawn in the past 24 hours — clean sheet.' : `Nothing withdrawn ${windowLabel(currentWindow).toLowerCase()} — clean sheet.` },
       expiring: { data: SNAPSHOT.expiringSoon || [],   dot: 'amber', pills: (l) => pill(dom(l.first_seen) + ' days', 'amber') + pill('Call before expiry', 'orange'), empty: 'No listings approaching 90 days.' },
       expired:  { data: expiredData,                   dot: 'amber', pills: (l) => pill(dom(l.first_seen) + ' days on market', 'amber') + pill('Agreement likely expired', 'red'), empty: currentWindow === 'daily' ? 'Nothing crossed 91 days in the past 24 hours.' : 'No expired listings.' },
-      fsbo:     { data: SNAPSHOT.fsboAll || [],        dot: 'navy',  pills: () => pill('Private Sale', 'navy'), empty: 'No active private listings.' },
+      fsbo:     { data: SNAPSHOT.fsboAll || [],        dot: 'navy',  pills: (l) => pill('Private Sale', 'navy') + (l.first_seen ? pill('Listed ' + fmtShort(l.first_seen), 'blue') : ''), empty: 'No active private listings.' },
     }[hotlistSel];
     const tab = HOTLIST_TABS.find(t => t.key === hotlistSel);
 
