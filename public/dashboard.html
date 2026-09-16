@@ -60,25 +60,18 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
 .hero-stat-clickable{cursor:pointer;transition:background 0.15s,border-color 0.15s;}
 .hero-stat-clickable:hover{background:rgba(255,255,255,0.1);border-color:rgba(255,255,255,0.22);}
 
-/* DIRECTORY MODAL — agent/agency list opened from the Active Agencies /
-   Active Agents hero-stat cards. Phone/email are left blank on purpose —
-   no contact enrichment is wired up yet (see planned OpenAI-lookup
-   feature) — this just proves the directory + listings view first. */
-.directory-overlay{display:none;position:fixed;inset:0;background:rgba(10,10,10,0.55);z-index:1000;padding:20px;overflow-y:auto;}
-.directory-overlay.show{display:block;}
-.directory-modal{max-width:720px;margin:0 auto;background:var(--white);border-radius:12px;overflow:hidden;}
-.directory-hdr{background:var(--navy);color:var(--white);padding:18px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;}
-.directory-hdr-title{font-family:'Poppins',sans-serif;font-size:16px;font-weight:700;}
-.directory-hdr-sub{font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px;}
-.directory-close{background:rgba(255,255,255,0.1);border:none;color:var(--white);width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;flex-shrink:0;}
-.directory-list{padding:8px;}
+/* DIRECTORY — agent/agency list, opened from the Active Agencies / Active
+   Agents hero-stat cards, rendered inline into the same content-section
+   panel Hot Lists/Leaderboards use, not a popup. Phone/email are left
+   blank on purpose — no contact enrichment is wired up yet (see planned
+   OpenAI-lookup feature) — this just proves the directory + listings view. */
 .dir-row{border-bottom:.5px solid var(--border);}
-.dir-row-main{padding:12px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;}
+.dir-row-main{padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;}
 .dir-row-main:hover{background:var(--off);}
 .dir-row-name{font-size:13px;font-weight:600;color:var(--text);}
 .dir-row-agency{font-size:11px;color:var(--muted);margin-top:2px;}
 .dir-row-count{font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:var(--orange);background:var(--orange-dim);padding:3px 10px;border-radius:999px;flex-shrink:0;}
-.dir-detail{display:none;padding:0 12px 16px;}
+.dir-detail{display:none;padding:0 14px 16px;}
 .dir-detail.show{display:block;}
 .dir-contact{display:flex;gap:16px;flex-wrap:wrap;padding:10px 0 12px;font-size:12px;color:var(--muted);}
 .dir-contact-empty{color:var(--muted);font-style:italic;}
@@ -253,18 +246,6 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
   <a href="#">Manage preferences</a>
 </div>
 
-<div class="directory-overlay" id="directory-overlay" onclick="if(event.target===this)closeDirectory()">
-  <div class="directory-modal">
-    <div class="directory-hdr">
-      <div>
-        <div class="directory-hdr-title" id="directory-title">Directory</div>
-        <div class="directory-hdr-sub" id="directory-sub"></div>
-      </div>
-      <button class="directory-close" onclick="closeDirectory()">&times;</button>
-    </div>
-    <div class="directory-list" id="directory-list"></div>
-  </div>
-</div>
 <script>
 // ── CONFIG ────────────────────────────────────────────────────────────────────
 const CONFIG = {
@@ -393,6 +374,7 @@ let currentWindow  = 'daily';     // 'daily' | 'wtd' | 'last_week' | 'mtd' | 'la
 let mainTab        = 'hotlists';  // 'hotlists' | 'leaderboards'
 let hotlistSel      = 'rns';      // 'rns' | 'expiring' | 'expired' | 'fsbo'
 let lbSel           = 'agency_listed'; // 'agency_listed' | 'agent_listed' | 'agency_sold' | 'agent_sold'
+let directoryView   = null;       // null | 'agency' | 'agent' — overrides the content panel when set, cleared by switching Hot Lists/Leaderboards
 let LGA_CREATED_AT  = null;
 let SNAPSHOT = {};      // window-independent lists, fetched once: expiringSoon, expiredAll, expiredToday, fsboAll, totalActive
 const WINDOW_CACHE = {}; // keyed by window -> { rns, listed:{agency,agent,total}, sold:{agency,agent,total} }, fetched on first visit to that window
@@ -434,7 +416,10 @@ function tallyAgent(rows) {
 
 // ── WINDOW LABELS ─────────────────────────────────────────────────────────────
 function windowLabel(win) {
-  return { daily: 'Today', wtd: 'Week to Date', last_week: 'Last Week', mtd: 'Month to Date', last_month: 'Last Month' }[win];
+  // 'daily' is a rolling 24-hour window (see getWindowBounds), not since-
+  // midnight — "Past 24 Hours" says that accurately; "Today" implied a
+  // calendar boundary that isn't what's actually being measured.
+  return { daily: 'Past 24 Hours', wtd: 'Week to Date', last_week: 'Last Week', mtd: 'Month to Date', last_month: 'Last Month' }[win];
 }
 function heroTitle(win) {
   return {
@@ -473,6 +458,7 @@ const LB_TABS = [
 
 function setMainTab(tab, btn) {
   mainTab = tab;
+  directoryView = null;
   document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   renderStatGrid();
@@ -481,6 +467,7 @@ function setMainTab(tab, btn) {
 function selectHotlist(key) {
   mainTab = 'hotlists';
   hotlistSel = key;
+  directoryView = null;
   document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
   document.getElementById('main-tabs').children[0].classList.add('active');
   renderStatGrid();
@@ -490,9 +477,15 @@ function selectHotlist(key) {
 function selectLeaderboard(key) {
   mainTab = 'leaderboards';
   lbSel = key;
+  directoryView = null;
   document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
   document.getElementById('main-tabs').children[1].classList.add('active');
   renderStatGrid();
+  renderContent();
+  scrollTo('content-section');
+}
+function showDirectory(kind) {
+  directoryView = kind;
   renderContent();
   scrollTo('content-section');
 }
@@ -516,19 +509,43 @@ function renderContent() {
   const bodyEl = document.getElementById('content-body');
   const cache = WINDOW_CACHE[currentWindow] || { rns: [] };
 
+  if (directoryView) {
+    const kind = directoryView;
+    const rows = SNAPSHOT.totalActive[kind];
+    titleEl.innerHTML = `<span class="sec-dot dot-orange"></span>${kind === 'agency' ? 'Active Agencies' : 'Active Agents'}`;
+    countEl.textContent = `${rows.length} ${kind === 'agency' ? 'agencies' : 'agents'}`;
+    bodyEl.innerHTML = rows.length === 0
+      ? `<div class="sec-empty">None active right now.</div>`
+      : rows.map((r, i) => {
+          const name = kind === 'agency' ? r.agency : r.agent;
+          const sub  = kind === 'agent' ? r.agency : '';
+          return `<div class="dir-row">
+            <div class="dir-row-main" onclick="toggleDirRow(${i})">
+              <div>
+                <div class="dir-row-name">${name || '—'}</div>
+                ${sub ? `<div class="dir-row-agency">${sub}</div>` : ''}
+              </div>
+              <div class="dir-row-count">${r.count} listing${r.count === 1 ? '' : 's'}</div>
+            </div>
+            <div class="dir-detail" id="dir-detail-${i}"></div>
+          </div>`;
+        }).join('');
+    return;
+  }
+
   const HOTLIST_TABS = [
     { key: 'rns',      label: `Removed – Not Sold (${windowLabel(currentWindow)})` },
     { key: 'expiring', label: 'Expiring Soon (75–90 Days)' },
-    { key: 'expired',  label: currentWindow === 'daily' ? 'Newly Expired (Crossed 91 Days Today)' : 'Expired (91+ Days)' },
+    { key: 'expired',  label: currentWindow === 'daily' ? 'Newly Expired (Crossed 91 Days in Past 24h)' : 'Expired (91+ Days)' },
     { key: 'fsbo',     label: 'Private Sales' },
   ];
 
   if (mainTab === 'hotlists') {
     const expiredData = currentWindow === 'daily' ? (SNAPSHOT.expiredToday || []) : (SNAPSHOT.expiredAll || []);
     const map = {
-      rns:      { data: cache.rns || [],              dot: 'red',   pills: () => pill('Withdrawn', 'red') + pill('Call Owner', 'orange'), empty: `Nothing withdrawn ${windowLabel(currentWindow).toLowerCase()} — clean sheet.` },
+      rns:      { data: cache.rns || [],              dot: 'red',   pills: () => pill('Withdrawn', 'red') + pill('Call Owner', 'orange'), empty: currentWindow === 'daily' ? 'Nothing withdrawn in the past 24 hours — clean sheet.' : `Nothing withdrawn ${windowLabel(currentWindow).toLowerCase()} — clean sheet.` },
       expiring: { data: SNAPSHOT.expiringSoon || [],   dot: 'amber', pills: (l) => pill(dom(l.first_seen) + ' days', 'amber') + pill('Call before expiry', 'orange'), empty: 'No listings approaching 90 days.' },
-      expired:  { data: expiredData,                   dot: 'amber', pills: (l) => pill(dom(l.first_seen) + ' days on market', 'amber') + pill('Agreement likely expired', 'red'), empty: currentWindow === 'daily' ? 'Nothing crossed 91 days today.' : 'No expired listings.' },
+      expired:  { data: expiredData,                   dot: 'amber', pills: (l) => pill(dom(l.first_seen) + ' days on market', 'amber') + pill('Agreement likely expired', 'red'), empty: currentWindow === 'daily' ? 'Nothing crossed 91 days in the past 24 hours.' : 'No expired listings.' },
       fsbo:     { data: SNAPSHOT.fsboAll || [],        dot: 'navy',  pills: () => pill('Private Sale', 'navy'), empty: 'No active private listings.' },
     }[hotlistSel];
     const tab = HOTLIST_TABS.find(t => t.key === hotlistSel);
@@ -638,7 +655,7 @@ function renderHero(data) {
   // title already ends in the connector word "in" — "This week so far, in
   // Wollongong" wants a space there, not a second comma.
   document.getElementById('hero-title-sep').textContent = currentWindow === 'daily' ? ', ' : ' ';
-  const rnsLabel = { daily: 'withdrawn and still unsold today', wtd: 'withdrawn and still unsold this week so far', last_week: 'withdrawn and still unsold last week', mtd: 'withdrawn and still unsold this month so far', last_month: 'withdrawn and still unsold last month' }[currentWindow];
+  const rnsLabel = { daily: 'withdrawn and still unsold in the past 24 hours', wtd: 'withdrawn and still unsold this week so far', last_week: 'withdrawn and still unsold last week', mtd: 'withdrawn and still unsold this month so far', last_month: 'withdrawn and still unsold last month' }[currentWindow];
   document.getElementById('hero-sub').textContent = `${data.rns.length} ${rnsLabel} — ${CONFIG.lgaName}`;
 
   const { start, end } = getWindowBounds(currentWindow);
@@ -651,11 +668,11 @@ function renderHero(data) {
       <div class="hero-stat-num">${SNAPSHOT.totalActive.total ?? '—'}</div>
       <div class="hero-stat-lbl">Total Active</div>
     </div>
-    <div class="hero-stat hero-stat-clickable" onclick="openDirectory('agency')">
+    <div class="hero-stat hero-stat-clickable" onclick="showDirectory('agency')">
       <div class="hero-stat-num">${SNAPSHOT.totalActive.agency.length}</div>
       <div class="hero-stat-lbl">Active Agencies</div>
     </div>
-    <div class="hero-stat hero-stat-clickable" onclick="openDirectory('agent')">
+    <div class="hero-stat hero-stat-clickable" onclick="showDirectory('agent')">
       <div class="hero-stat-num">${SNAPSHOT.totalActive.agent.length}</div>
       <div class="hero-stat-lbl">Active Agents</div>
     </div>
@@ -705,7 +722,7 @@ function renderStatGrid() {
     </div>
     <div class="stat ${hotlistSel === 'expired' ? 'active' : ''}" id="hs-expired" onclick="selectHotlist('expired')">
       <div class="stat-main"><span class="stat-num">${expiredData.length}</span><span class="stat-lbl">${currentWindow === 'daily' ? 'Newly Expired' : 'Expired'}</span></div>
-      <div class="stat-badge badge-amber">${currentWindow === 'daily' ? '91 Days, Today' : '91+ Days, All'}</div>
+      <div class="stat-badge badge-amber">${currentWindow === 'daily' ? '91 Days, Past 24h' : '91+ Days, All'}</div>
     </div>
     <div class="stat ${hotlistSel === 'fsbo' ? 'active' : ''}" id="hs-fsbo" onclick="selectHotlist('fsbo')">
       <div class="stat-main"><span class="stat-num">${(SNAPSHOT.fsboAll || []).length}</span><span class="stat-lbl">FSBO</span></div>
@@ -789,44 +806,17 @@ function scrollTo(id) {
   document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-// ── DIRECTORY MODAL ───────────────────────────────────────────────────────────
-// Opened from the Active Agencies / Active Agents hero-stat cards. Lists
-// every agency or agent currently active in the territory with their
-// current-listing count, expandable to show phone/email (blank for now —
-// no contact enrichment wired up yet) plus a clickable list of their
-// current listings, built from SNAPSHOT.totalActiveRows without a second
-// query — that data's already on the page.
-function openDirectory(kind) {
-  const rows = SNAPSHOT.totalActive[kind]; // already tallied + sorted by count desc
-  const title = kind === 'agency' ? 'Active Agencies' : 'Active Agents';
-  document.getElementById('directory-title').textContent = title;
-  document.getElementById('directory-sub').textContent = `${rows.length} ${kind === 'agency' ? 'agencies' : 'agents'} — ${CONFIG.lgaName}`;
-
-  document.getElementById('directory-list').innerHTML = rows.map((r, i) => {
-    const name = kind === 'agency' ? r.agency : r.agent;
-    const sub  = kind === 'agent' ? r.agency : '';
-    return `
-      <div class="dir-row">
-        <div class="dir-row-main" onclick="toggleDirRow(${i}, '${kind}')">
-          <div>
-            <div class="dir-row-name">${name || '—'}</div>
-            ${sub ? `<div class="dir-row-agency">${sub}</div>` : ''}
-          </div>
-          <div class="dir-row-count">${r.count} listing${r.count === 1 ? '' : 's'}</div>
-        </div>
-        <div class="dir-detail" id="dir-detail-${kind}-${i}"></div>
-      </div>`;
-  }).join('');
-
-  document.getElementById('directory-overlay').classList.add('show');
-}
-
-function closeDirectory() {
-  document.getElementById('directory-overlay').classList.remove('show');
-}
-
-function toggleDirRow(i, kind) {
-  const el = document.getElementById(`dir-detail-${kind}-${i}`);
+// ── DIRECTORY ─────────────────────────────────────────────────────────────────
+// Opened from the Active Agencies / Active Agents hero-stat cards, rendered
+// inline by renderContent() above (see the directoryView branch) — same
+// content-section panel Hot Lists/Leaderboards use, not a popup. Each row
+// expands to show phone/email (blank for now — no contact enrichment wired
+// up yet) plus a clickable list of current listings, built from
+// SNAPSHOT.totalActiveRows without a second query — that data's already on
+// the page.
+function toggleDirRow(i) {
+  const kind = directoryView;
+  const el = document.getElementById(`dir-detail-${i}`);
   const alreadyOpen = el.classList.contains('show');
   document.querySelectorAll('.dir-detail.show').forEach(d => d.classList.remove('show'));
   if (alreadyOpen) return;
@@ -865,7 +855,13 @@ function downloadCSV() {
   const today = new Date().toISOString().slice(0, 10);
   let headers, rows, label;
 
-  if (mainTab === 'hotlists') {
+  if (directoryView) {
+    const kind = directoryView;
+    const dRows = SNAPSHOT.totalActive[kind];
+    headers = kind === 'agent' ? ['Agent', 'Agency', 'Active Listings'] : ['Agency', 'Active Listings'];
+    rows = dRows.map(r => kind === 'agent' ? [r.agent, r.agency, r.count] : [r.agency, r.count]);
+    label = `active_${kind}s`;
+  } else if (mainTab === 'hotlists') {
     const cache = WINDOW_CACHE[currentWindow] || { rns: [] };
     const expiredData = currentWindow === 'daily' ? (SNAPSHOT.expiredToday || []) : (SNAPSHOT.expiredAll || []);
     const dataMap = { rns: cache.rns, expiring: SNAPSHOT.expiringSoon || [], expired: expiredData, fsbo: SNAPSHOT.fsboAll || [] };
