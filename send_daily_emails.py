@@ -61,6 +61,7 @@ def get_lga(lga_id: int) -> dict:
 def compute_counts(lga_id: int, ref: dt.datetime) -> dict:
     """Mirrors makebank_daily_brief.html's own queries exactly."""
     yesterday = (ref - dt.timedelta(days=1)).isoformat()
+    yesterday_date = (ref - dt.timedelta(days=1)).date().isoformat()
     days90 = (ref - dt.timedelta(days=90)).date().isoformat()
     days75 = (ref - dt.timedelta(days=75)).date().isoformat()
 
@@ -70,7 +71,16 @@ def compute_counts(lga_id: int, ref: dt.datetime) -> dict:
 
     return {
         "new_listings": new_listings_count,
-        "new_sales": sb_count("sold", f"lga_id=eq.{lga_id}&first_seen=gte.{yesterday}&select=id"),
+        # sold.first_seen is NEVER a real date — it's just whenever the
+        # scraper happened to write the row (always "now" at insert time).
+        # sold_date IS real — scraped straight from REA's own "Sold on..."
+        # text. Using first_seen here meant a territory's entire hydration
+        # snapshot (all inserted in one burst) showed as "new sales" on the
+        # very first email, regardless of when anything actually sold —
+        # found for real on Port Macquarie (17 Sep 2026): reported 125 new
+        # sales when REA showed ~2 actually sold that day. sold_date fixes
+        # this the same way the live dashboard's own sold query already does.
+        "new_sales": sb_count("sold", f"lga_id=eq.{lga_id}&sold_date=gte.{yesterday_date}&select=id"),
         "hot_leads": sb_count("listings", f"lga_id=eq.{lga_id}&status=eq.removed_not_sold&removed_at=gte.{yesterday}&select=id"),
         "newly_expired": sb_count("listings", f"lga_id=eq.{lga_id}&status=eq.active&first_seen=lte.{days90}&select=id"),
         "expiring_soon": sb_count("listings", f"lga_id=eq.{lga_id}&status=eq.active&first_seen=gte.{days90}&first_seen=lte.{days75}&select=id"),
