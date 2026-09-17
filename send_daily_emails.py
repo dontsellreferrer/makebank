@@ -15,9 +15,10 @@ Usage:
 """
 import argparse
 import logging
+from dotenv import load_dotenv
+load_dotenv()
 
 import requests
-
 from fetch_and_build_daily_email import (
     SUPABASE_URL, SUPABASE_KEY, sb_count, sb_rows, is_fsbo, main as _unused,
 )
