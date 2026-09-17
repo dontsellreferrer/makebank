@@ -882,12 +882,23 @@ def run_scrape_phase1(sb: Client, pool: CookiePool, lga: dict, run_type: str, ma
 
 
 def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]] = None,
-                       run_type: Optional[str] = None, batch_limit: Optional[int] = None):
+                       run_type: Optional[str] = None, batch_limit: Optional[int] = None,
+                       parallel: int = 1):
     """Detail-scrapes whatever Phase 1 queued in pending_scrape_urls.
     Optionally restricted to specific LGA ids (staggered batches), a single
     run_type, and/or capped to batch_limit URLs for this run. Grouped by
     (lga_id, run_type) so each group's results land in the right table under
-    the right LGA, and each group gets its own `runs` log entry."""
+    the right LGA, and each group gets its own `runs` log entry.
+
+    parallel controls how many (lga_id, run_type) groups detail-scrape at
+    once — same ThreadPoolExecutor pattern as Phase 1's --parallel across
+    LGAs (see process_lga() in main()). Added 17 Sep 2026: this ran fully
+    sequentially at first, one URL at a time regardless of --parallel — at
+    ~7-9s/listing that meant ~2500 URLs (the realistic ceiling even at 50
+    LGAs, given REA's ~1000-listing region cap) took 5-6 hours, well past
+    the cron's own window. Concurrent groups is what actually fixes that,
+    not staggering across separate cron times — the total volume here is
+    small enough that simple concurrency is sufficient on its own."""
     query = sb.table('pending_scrape_urls').select('*')
     if lga_ids:
         query = query.in_('lga_id', lga_ids)
@@ -908,7 +919,8 @@ def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]]
         key = (row['lga_id'], row['run_type'])
         groups.setdefault(key, []).append(row)
 
-    for (lga_id, r_type), rows in groups.items():
+    def process_group(key, rows):
+        lga_id, r_type = key
         table = 'listings' if r_type == 'listings' else 'sold'
         urls = [r['url'] for r in rows]
         log.info(f"{'='*60}")
@@ -946,6 +958,20 @@ def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]]
         duration = time.time() - t_start
         store.log_run(f'{r_type}_phase2', inserted, 0, 0, status, error_msg, duration)
         log.info(f"Phase 2 complete for LGA {lga_id}/{r_type} in {duration:.1f}s")
+
+    if parallel > 1 and len(groups) > 1:
+        log.info(f"Phase 2: running {min(parallel, len(groups))} group(s) in parallel")
+        with ThreadPoolExecutor(max_workers=parallel) as executor:
+            futures = {executor.submit(process_group, key, rows): key for key, rows in groups.items()}
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    log.error(f"Group {key} failed: {e}")
+    else:
+        for key, rows in groups.items():
+            process_group(key, rows)
 
 # ── Reconcile ─────────────────────────────────────────────────────────────────
 def run_reconcile(sb: Client, lga: dict):
@@ -1023,13 +1049,16 @@ def main():
             lga_ids=args.lga,
             run_type=(None if args.type == 'both' else args.type),
             batch_limit=args.batch_limit,
+            parallel=args.parallel,
         )
         log.info("Phase 2 run complete.")
         return
 
-    if args.parallel > 5:
-        log.warning(f"--parallel {args.parallel} requested, but there are only 5 cookie slots — "
-                    f"anything past 5 concurrent LGAs will just queue and wait for a slot to free up.")
+    if args.parallel > 30:
+        log.warning(f"--parallel {args.parallel} requested, but the shared cookie pool is only ~30 — "
+                    f"anything pushing much past that concentrates load onto fewer cookies per request. "
+                    f"Concurrency above 8 has also shown REA itself start timing out in testing (16 Sep 2026), "
+                    f"independent of cookie count.")
 
     query = sb.table('lgas').select('*').eq('active', True)
     if not args.ignore_dated_check:
