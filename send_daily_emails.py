@@ -59,11 +59,23 @@ def get_lga(lga_id: int) -> dict:
 
 
 def compute_counts(lga_id: int, ref: dt.datetime) -> dict:
-    """Mirrors makebank_daily_brief.html's own queries exactly."""
+    """Mirrors dashboard.html's own queries exactly (18 Sep 2026 — corrected
+    to actually match after finding Expiring Soon/Newly Expired diverged
+    badly from the live dashboard: the shared sb_count/sb_rows helpers in
+    fetch_and_build_daily_email.py built request params from a dict, which
+    silently drops one bound whenever a query needs two on the same field
+    (like first_seen gte + lte) — now fixed there. newly_expired here was
+    also wrong independent of that bug: it was counting the ENTIRE
+    historical backlog of 90+ day listings, not just the ones that crossed
+    90 days specifically in the last 24 hours, which is what the dashboard's
+    own 'Newly Expired' actually means."""
     yesterday = (ref - dt.timedelta(days=1)).isoformat()
     yesterday_date = (ref - dt.timedelta(days=1)).date().isoformat()
-    days90 = (ref - dt.timedelta(days=90)).date().isoformat()
     days75 = (ref - dt.timedelta(days=75)).date().isoformat()
+    days90 = (ref - dt.timedelta(days=90)).date().isoformat()
+    # Narrow ~24h band, matches dashboard.html's days90Start/days90End exactly
+    days90_start = (ref - dt.timedelta(days=91)).isoformat()
+    days90_end = (ref - dt.timedelta(days=90)).isoformat()
 
     new_listing_rows = sb_rows("listings", f"lga_id=eq.{lga_id}&status=eq.active&first_seen=gte.{yesterday}&select=agency")
     fsbo_count = sum(1 for r in new_listing_rows if is_fsbo(r.get("agency")))
@@ -71,18 +83,9 @@ def compute_counts(lga_id: int, ref: dt.datetime) -> dict:
 
     return {
         "new_listings": new_listings_count,
-        # sold.first_seen is NEVER a real date — it's just whenever the
-        # scraper happened to write the row (always "now" at insert time).
-        # sold_date IS real — scraped straight from REA's own "Sold on..."
-        # text. Using first_seen here meant a territory's entire hydration
-        # snapshot (all inserted in one burst) showed as "new sales" on the
-        # very first email, regardless of when anything actually sold —
-        # found for real on Port Macquarie (17 Sep 2026): reported 125 new
-        # sales when REA showed ~2 actually sold that day. sold_date fixes
-        # this the same way the live dashboard's own sold query already does.
         "new_sales": sb_count("sold", f"lga_id=eq.{lga_id}&sold_date=gte.{yesterday_date}&select=id"),
         "hot_leads": sb_count("listings", f"lga_id=eq.{lga_id}&status=eq.removed_not_sold&removed_at=gte.{yesterday}&select=id"),
-        "newly_expired": sb_count("listings", f"lga_id=eq.{lga_id}&status=eq.active&first_seen=lte.{days90}&select=id"),
+        "newly_expired": sb_count("listings", f"lga_id=eq.{lga_id}&status=eq.active&first_seen=gte.{days90_start}&first_seen=lt.{days90_end}&select=id"),
         "expiring_soon": sb_count("listings", f"lga_id=eq.{lga_id}&status=eq.active&first_seen=gte.{days90}&first_seen=lte.{days75}&select=id"),
         "new_fsbo": fsbo_count,
     }

@@ -1,8 +1,8 @@
 """
 Fetches today's real counts from Supabase and generates a hydrated Daily Email.
 
-Mirrors the exact queries makebank_daily_brief.html uses, so the numbers in the
-email match what the dashboard shows for the same day.
+Mirrors the exact queries makebank's dashboard.html uses, so the numbers in
+the email match what the dashboard shows for the same day.
 
 Usage:
     pip install requests --break-system-packages
@@ -28,11 +28,22 @@ def is_fsbo(agency):
     return any(k in agency for k in FSBO_KEYWORDS)
 
 
+def _parse_params(params: str):
+    # A dict can't hold two entries with the same key — and PostgREST range
+    # queries legitimately need that (e.g. two 'first_seen' bounds, one
+    # gte one lte). Using a dict here silently dropped one of the two
+    # bounds on any such query, turning a narrow date window into an
+    # unbounded one (found 18 Sep 2026 — Expiring Soon reported 445 when
+    # the dashboard's own correct count was 64). requests accepts a list
+    # of tuples and sends every one of them, dict or not.
+    return [tuple(p.split('=', 1)) for p in params.split('&')]
+
+
 def sb_count(table, params):
     """Returns the exact row count for a filtered query, mirroring the dashboard's sb() helper."""
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/{table}",
-        params=dict(p.split('=', 1) for p in params.split('&')),
+        params=_parse_params(params),
         headers={
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -48,12 +59,11 @@ def sb_count(table, params):
 def sb_rows(table, params):
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/{table}",
-        params=dict(p.split('=', 1) for p in params.split('&')),
+        params=_parse_params(params),
         headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
     )
     r.raise_for_status()
     return r.json()
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -67,6 +77,13 @@ def main():
     yesterday = (ref - dt.timedelta(days=1)).isoformat()
     days90 = (ref - dt.timedelta(days=90)).date().isoformat()
     days75 = (ref - dt.timedelta(days=75)).date().isoformat()
+    # "Newly Expired" on the dashboard is a narrow ~24h band — listings that
+    # crossed 90 days old specifically today, not the whole historical
+    # backlog of everything past 90 days (that's what "Expired (All)"
+    # would mean, a different metric the dashboard shows in non-daily
+    # windows). Matches dashboard.html's days90Start/days90End exactly.
+    days90_start = (ref - dt.timedelta(days=91)).isoformat()
+    days90_end = (ref - dt.timedelta(days=90)).isoformat()
 
     lga = args.lga
 
@@ -78,9 +95,9 @@ def main():
     fsbo_count = sum(1 for r in new_listing_rows if is_fsbo(r.get("agency")))
     new_listings_count = len(new_listing_rows) - fsbo_count
 
-    new_sales_count = sb_count("sold", f"lga_id=eq.{lga}&first_seen=gte.{yesterday}&select=id")
+    new_sales_count = sb_count("sold", f"lga_id=eq.{lga}&sold_date=gte.{(ref - dt.timedelta(days=1)).date().isoformat()}&select=id")
     hot_leads_count = sb_count("listings", f"lga_id=eq.{lga}&status=eq.removed_not_sold&removed_at=gte.{yesterday}&select=id")
-    newly_expired_count = sb_count("listings", f"lga_id=eq.{lga}&status=eq.active&first_seen=lte.{days90}&select=id")
+    newly_expired_count = sb_count("listings", f"lga_id=eq.{lga}&status=eq.active&first_seen=gte.{days90_start}&first_seen=lt.{days90_end}&select=id")
     expiring_soon_count = sb_count("listings", f"lga_id=eq.{lga}&status=eq.active&first_seen=gte.{days90}&first_seen=lte.{days75}&select=id")
 
     display_date = ref.strftime("%A, %-d %B %Y")
