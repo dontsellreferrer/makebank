@@ -173,7 +173,12 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
 .lb-btn{background:none;border:none;color:var(--muted);font-size:11px;font-weight:600;padding:6px 14px;cursor:pointer;font-family:inherit;transition:all 0.12s;}
 .lb-btn.active{background:var(--navy);color:var(--white);}
 .lb-list{padding:0 14px 12px;display:flex;flex-direction:column;gap:6px;max-height:520px;overflow-y:auto;}
-.lb-row{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--off);border:.5px solid var(--border);border-radius:8px;}
+.lb-row-wrap{margin:0 14px 6px;}
+.lb-row-wrap:first-child{margin-top:12px;}
+.lb-row-wrap:last-child{margin-bottom:12px;}
+.lb-row{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--off);border:.5px solid var(--border);border-radius:8px;cursor:pointer;transition:border-color 0.12s;}
+.lb-row:hover{border-color:var(--orange);}
+.lb-row-wrap .dir-detail{padding:10px 4px 14px;}
 .medal{width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:800;flex-shrink:0;}
 .medal.gold{background:rgba(245,200,66,0.15);color:#B8960C;}
 .medal.silver{background:rgba(100,100,120,0.12);color:#7A7A8C;}
@@ -375,9 +380,10 @@ let mainTab        = 'hotlists';  // 'hotlists' | 'leaderboards'
 let hotlistSel      = 'rns';      // 'rns' | 'expiring' | 'expired' | 'fsbo'
 let lbSel           = 'agency_listed'; // 'agency_listed' | 'agent_listed' | 'agency_sold' | 'agent_sold'
 let directoryView   = null;       // null | 'agency' | 'agent' — overrides the content panel when set, cleared by switching Hot Lists/Leaderboards
+let statView        = null;       // null | 'total_active' | 'listed' | 'sold' — flat property list for a hero stat, same override mechanism as directoryView
 let LGA_CREATED_AT  = null;
 let SNAPSHOT = {};      // window-independent lists, fetched once: expiringSoon, expiredAll, expiredToday, fsboAll, totalActive
-const WINDOW_CACHE = {}; // keyed by window -> { rns, listed:{agency,agent,total}, sold:{agency,agent,total} }, fetched on first visit to that window
+const WINDOW_CACHE = {}; // keyed by window -> { rns, listed:{agency,agent,total,rows}, sold:{agency,agent,total,rows} }, fetched on first visit to that window
 
 // ── RENDER HELPERS ────────────────────────────────────────────────────────────
 function medal(i) {
@@ -471,6 +477,7 @@ const LB_TABS = [
 function setMainTab(tab, btn) {
   mainTab = tab;
   directoryView = null;
+  statView = null;
   document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   renderStatGrid();
@@ -480,6 +487,7 @@ function selectHotlist(key) {
   mainTab = 'hotlists';
   hotlistSel = key;
   directoryView = null;
+  statView = null;
   document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
   document.getElementById('main-tabs').children[0].classList.add('active');
   renderStatGrid();
@@ -490,6 +498,7 @@ function selectLeaderboard(key) {
   mainTab = 'leaderboards';
   lbSel = key;
   directoryView = null;
+  statView = null;
   document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
   document.getElementById('main-tabs').children[1].classList.add('active');
   renderStatGrid();
@@ -498,6 +507,13 @@ function selectLeaderboard(key) {
 }
 function showDirectory(kind) {
   directoryView = kind;
+  statView = null;
+  renderContent();
+  scrollTo('content-section');
+}
+function showStatList(kind) {
+  statView = kind;
+  directoryView = null;
   renderContent();
   scrollTo('content-section');
 }
@@ -519,7 +535,26 @@ function renderContent() {
   const titleEl = document.getElementById('content-title');
   const countEl = document.getElementById('content-count');
   const bodyEl = document.getElementById('content-body');
-  const cache = WINDOW_CACHE[currentWindow] || { rns: [] };
+  const cache = WINDOW_CACHE[currentWindow] || { rns: [], listed: { rows: [] }, sold: { rows: [] } };
+
+  if (statView) {
+    const kind = statView;
+    const rows = kind === 'total_active' ? (SNAPSHOT.totalActiveRows || [])
+               : kind === 'listed'       ? (cache.listed?.rows || [])
+               :                            (cache.sold?.rows || []);
+    const title = kind === 'total_active' ? 'Total Active'
+                : kind === 'listed'       ? `Listed — ${windowLabel(currentWindow)}`
+                :                            `Sold — ${windowLabel(currentWindow)}`;
+    titleEl.innerHTML = `<span class="sec-dot dot-orange"></span>${title}`;
+    countEl.textContent = `${rows.length} listing${rows.length === 1 ? '' : 's'}`;
+    bodyEl.innerHTML = rows.length === 0
+      ? `<div class="sec-empty">None right now.</div>`
+      : rows.map(l => `<div class="dir-row">
+          <a class="dir-listing-link" href="${l.url || '#'}" target="_blank">${l.address || l.url || 'Listing'}</a>
+          ${(l.agent || l.agency) ? `<div class="dir-row-agency">${[l.agent, l.agency].filter(Boolean).join(' · ')}</div>` : ''}
+        </div>`).join('');
+    return;
+  }
 
   if (directoryView) {
     const kind = directoryView;
@@ -580,17 +615,20 @@ function renderContent() {
       const sub  = view === 'agent' ? r.agency : '';
       const pct  = total ? (r.count / total * 100).toFixed(1) : '0.0';
       const bar  = Math.round(r.count / max * 100);
-      return `<div class="lb-row">
-        <span class="medal ${medal(i)}">${i + 1}</span>
-        <div class="lb-info">
-          <div class="lb-name">${name || '—'}</div>
-          ${sub ? `<div class="lb-sub">${sub}</div>` : ''}
-          <div class="lb-bar-wrap"><div class="lb-bar" style="width:0%" data-w="${bar}"></div></div>
+      return `<div class="lb-row-wrap">
+        <div class="lb-row" onclick="toggleLbRow(${i})">
+          <span class="medal ${medal(i)}">${i + 1}</span>
+          <div class="lb-info">
+            <div class="lb-name">${name || '—'}</div>
+            ${sub ? `<div class="lb-sub">${sub}</div>` : ''}
+            <div class="lb-bar-wrap"><div class="lb-bar" style="width:0%" data-w="${bar}"></div></div>
+          </div>
+          <div class="lb-right">
+            <span class="lb-count">${r.count}</span>
+            <span class="lb-pct">${pct}%</span>
+          </div>
         </div>
-        <div class="lb-right">
-          <span class="lb-count">${r.count}</span>
-          <span class="lb-pct">${pct}%</span>
-        </div>
+        <div class="dir-detail" id="lb-detail-${i}"></div>
       </div>`;
     }).join('');
 
@@ -612,20 +650,24 @@ async function fetchWindowData(win) {
   const startDate = startISO.slice(0, 10);
   const endDate = endISO.slice(0, 10);
 
-  const [rns, listedAgency, listedAgent, listedCount, soldAgency, soldAgent, soldCount] = await Promise.all([
+  // listed/sold each fetch full rows (address, url included) in one query now
+  // instead of two agency-only/agent-only selects — the tallies are derived
+  // from the same rows client-side, and the raw rows are kept on the cache so
+  // clicking a leaderboard entry can show its underlying properties without
+  // a second query (same pattern as SNAPSHOT.totalActiveRows for the
+  // Active Agents/Agencies directory).
+  const [rns, listedRows, listedCount, soldRows, soldCount] = await Promise.all([
     sb('listings', `lga_id=eq.${lga}&status=eq.removed_not_sold&removed_at=gte.${startISO}&removed_at=lt.${endISO}&select=address,agent,agency,url,removed_at&order=removed_at.desc&limit=200`),
-    sb('listings', `lga_id=eq.${lga}&first_seen=gte.${startISO}&first_seen=lt.${endISO}&select=agency&order=agency.asc&limit=5000`),
-    sb('listings', `lga_id=eq.${lga}&first_seen=gte.${startISO}&first_seen=lt.${endISO}&select=agent,agency&order=agent.asc&limit=5000`),
+    sb('listings', `lga_id=eq.${lga}&first_seen=gte.${startISO}&first_seen=lt.${endISO}&select=agent,agency,address,url&order=agent.asc&limit=5000`),
     sb('listings', `lga_id=eq.${lga}&first_seen=gte.${startISO}&first_seen=lt.${endISO}&select=id`),
-    sb('sold', `lga_id=eq.${lga}&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=agency&order=agency.asc&limit=5000`),
-    sb('sold', `lga_id=eq.${lga}&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=agent,agency&order=agent.asc&limit=5000`),
+    sb('sold', `lga_id=eq.${lga}&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=agent,agency,address,url&order=agent.asc&limit=5000`),
     sb('sold', `lga_id=eq.${lga}&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=id`),
   ]);
 
   const result = {
     rns: rns.data,
-    listed: { agency: tally(listedAgency.data, 'agency'), agent: tallyAgent(listedAgent.data), total: listedCount.count },
-    sold:   { agency: tally(soldAgency.data, 'agency'),   agent: tallyAgent(soldAgent.data),   total: soldCount.count },
+    listed: { agency: tally(listedRows.data, 'agency'), agent: tallyAgent(listedRows.data), total: listedCount.count, rows: listedRows.data },
+    sold:   { agency: tally(soldRows.data, 'agency'),   agent: tallyAgent(soldRows.data),   total: soldCount.count, rows: soldRows.data },
   };
   WINDOW_CACHE[win] = result;
   return result;
@@ -676,7 +718,7 @@ function renderHero(data) {
     : `${fmtShort(start)} – ${fmtShort(new Date(end.getTime() - (currentWindow === 'last_week' || currentWindow === 'last_month' ? 86400000 : 0)))}`;
 
   document.getElementById('hero-stats').innerHTML = `
-    <div class="hero-stat">
+    <div class="hero-stat hero-stat-clickable" onclick="showStatList('total_active')">
       <div class="hero-stat-num">${SNAPSHOT.totalActive.total ?? '—'}</div>
       <div class="hero-stat-lbl">Total Active</div>
     </div>
@@ -688,11 +730,11 @@ function renderHero(data) {
       <div class="hero-stat-num">${SNAPSHOT.totalActive.agent.length}</div>
       <div class="hero-stat-lbl">Active Agents</div>
     </div>
-    <div class="hero-stat">
+    <div class="hero-stat hero-stat-clickable" onclick="showStatList('listed')">
       <div class="hero-stat-num">${data.listed.total ?? 0}</div>
       <div class="hero-stat-lbl">Listed — ${windowLabel(currentWindow)}</div>
     </div>
-    <div class="hero-stat">
+    <div class="hero-stat hero-stat-clickable" onclick="showStatList('sold')">
       <div class="hero-stat-num">${data.sold.total ?? 0}</div>
       <div class="hero-stat-lbl">Sold — ${windowLabel(currentWindow)}</div>
     </div>`;
@@ -847,6 +889,30 @@ function toggleDirRow(i) {
   el.classList.add('show');
 }
 
+// Opened from a Leaderboards row — same accordion pattern as toggleDirRow
+// above, but filtering the raw listed/sold rows already sitting in
+// WINDOW_CACHE for the current window instead of SNAPSHOT.totalActiveRows.
+function toggleLbRow(i) {
+  const el = document.getElementById(`lb-detail-${i}`);
+  const alreadyOpen = el.classList.contains('show');
+  document.querySelectorAll('.dir-detail.show').forEach(d => d.classList.remove('show'));
+  if (alreadyOpen) return;
+
+  const { rows, view } = getLbRows();
+  const cat = lbSel.endsWith('_sold') ? 'sold' : 'listed';
+  const raw = (WINDOW_CACHE[currentWindow]?.[cat]?.rows) || [];
+  const r = rows[i];
+  const name = view === 'agent' ? r.agent : r.agency;
+  const listings = raw.filter(l => view === 'agent' ? l.agent === name : l.agency === name);
+  const label = cat === 'sold' ? 'Sold' : 'Listed';
+
+  el.innerHTML = `
+    <div class="dir-listings-title">${label} (${listings.length})</div>
+    ${listings.map(l => `<a class="dir-listing-link" href="${l.url || '#'}" target="_blank">${l.address || l.url || 'Listing'}</a>`).join('')}
+  `;
+  el.classList.add('show');
+}
+
 // ── CSV EXPORT ────────────────────────────────────────────────────────────────
 function csvEscape(v) {
   const s = String(v ?? '');
@@ -867,7 +933,16 @@ function downloadCSV() {
   const today = new Date().toISOString().slice(0, 10);
   let headers, rows, label;
 
-  if (directoryView) {
+  if (statView) {
+    const kind = statView;
+    const cache = WINDOW_CACHE[currentWindow] || { listed: { rows: [] }, sold: { rows: [] } };
+    const sRows = kind === 'total_active' ? (SNAPSHOT.totalActiveRows || [])
+                : kind === 'listed'       ? (cache.listed?.rows || [])
+                :                            (cache.sold?.rows || []);
+    headers = ['Address', 'Agent', 'Agency', 'URL'];
+    rows = sRows.map(l => [l.address, l.agent, l.agency, l.url]);
+    label = kind === 'total_active' ? 'total_active' : `${kind}_${currentWindow}`;
+  } else if (directoryView) {
     const kind = directoryView;
     const dRows = SNAPSHOT.totalActive[kind];
     headers = kind === 'agent' ? ['Agent', 'Agency', 'Active Listings'] : ['Agency', 'Active Listings'];
