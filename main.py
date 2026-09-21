@@ -278,6 +278,28 @@ async def mark_converted(request: Request):
     return {"status": "converted"}
 
 
+@app.get("/api/recipient-detail")
+def recipient_detail(id: str):
+    """Full contact detail for one free_recipients row -- served through the
+    service-role key rather than widening the anon SELECT grant (which
+    deliberately excludes email/phone/agency/source_url -- see
+    6_trial_lifecycle_schema.sql). Keeps PII off the anon key entirely
+    instead of exposing it to anyone who copies that key out of any page's
+    source, which is trivial to do. Used by admin_engagement.html's
+    row-expand."""
+    sb = get_supabase()
+    rows = (
+        sb.table("free_recipients")
+        .select("id,principal_name,agency,email,phone,consent_basis,source_url,unsubscribe_token")
+        .eq("id", id)
+        .limit(1)
+        .execute()
+    ).data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Not found")
+    return rows[0]
+
+
 # Serves /order.html, /dashboard.html, /export.html, /admin.html exactly as
 # named in public/ -- e.g. makebank.com.au/order.html
 app.mount("/", StaticFiles(directory=PUBLIC_DIR, html=True), name="public")

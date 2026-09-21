@@ -54,17 +54,30 @@ def _wrap(header_kicker, header_title, header_sub, body_html, footer_html):
 
 
 def _cta(url, label):
-    return f'''<table role="presentation" cellpadding="0" cellspacing="0" style="margin:20px 0;"><tr>
-      <td style="background:{ORANGE};border-radius:9px;">
-        <a href="{url}" style="display:inline-block;padding:14px 30px;font-family:{FONT};font-size:14px;font-weight:700;color:#ffffff;text-decoration:none;">{label}</a>
-      </td>
-    </tr></table>'''
+    # Wrapped in a full-width outer table with align="center" on the td —
+    # the same mechanism build_daily_email.py uses. Plain CSS centering
+    # (margin:auto, text-align) is unreliable across email clients; this
+    # HTML-attribute approach is the one already proven to work.
+    return f'''<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;"><tr><td align="center">
+      <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+        <td style="background:{ORANGE};border-radius:9px;">
+          <a href="{url}" style="display:inline-block;padding:14px 30px;font-family:{FONT};font-size:14px;font-weight:700;color:#ffffff;text-decoration:none;">{label}</a>
+        </td>
+      </tr></table>
+    </td></tr></table>'''
+
+
+def _secondary_link(url, label):
+    # Lighter grey/navy variant of _cta(), same centering mechanism —
+    # for a secondary action next to (or instead of) the main orange CTA.
+    return f'''<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:12px;"><tr><td align="center">
+      <a href="{url}" style="display:inline-block;padding:12px 20px;font-family:{FONT};font-size:13px;font-weight:600;color:{NAVY};background:#F1F2F4;border-radius:7px;text-decoration:none;">{label}</a>
+    </td></tr></table>'''
 
 
 def _standard_footer(unsubscribe_link, extra_legal_html=""):
     return f'''<div style="font-family:{FONT};font-size:11px;color:#6B6B6B;line-height:1.7;">
       Powered by <a href="https://makebank.com.au" style="color:{ORANGE};text-decoration:none;">MakeBank</a>
-      &middot; part of the <a href="https://referrer.com.au" style="color:{ORANGE};text-decoration:none;">referrer.com.au</a> network
       <br><a href="{unsubscribe_link}" style="color:{ORANGE};text-decoration:none;">Unsubscribe</a>
     </div>
     {extra_legal_html}'''
@@ -168,9 +181,7 @@ def build_day3_region_email_html(name, lga_name, dashboard_base_url, lga_id, rec
         If most of your work actually falls outside {lga_name}, or spans a wider patch, you can set up your own
         region covering exactly where you work — takes about a minute.
       </div>
-      <div style="margin-top:12px;">
-        <a href="{create_region_link}" style="display:inline-block;padding:12px 20px;font-family:{FONT};font-size:13px;font-weight:600;color:{NAVY};background:#F1F2F4;border-radius:7px;text-decoration:none;">Create your own region &rarr;</a>
-      </div>'''
+      <div style="margin-top:12px;">{_secondary_link(create_region_link, "Create your own region &rarr;")}</div>'''
     return _wrap("MakeBank", f"One thing worth knowing about {lga_name}", "", body, _standard_footer(unsubscribe_link))
 
 
@@ -214,12 +225,14 @@ def build_feedback_email_html(name, lga_name, dashboard_base_url, lga_id, recipi
         {f'Just reply to this email ({reply_to_hint}).' if reply_to_hint else 'Just reply to this email.'}
       </div>
       <div style="font-family:{FONT};font-size:13px;color:#1a1a1a;line-height:1.7;margin-top:18px;">Changed your mind instead?</div>
-      <table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:8px;"><tr>
-        <td style="padding-right:10px;">
-          <a href="{dashboard_link}" style="display:inline-block;padding:12px 20px;font-family:{FONT};font-size:13px;font-weight:600;color:{NAVY};background:#F1F2F4;border-radius:7px;text-decoration:none;">See what you're missing &rarr;</a>
-        </td>
-        <td>
-          <a href="{renew_link}" style="display:inline-block;padding:12px 20px;font-family:{FONT};font-size:13px;font-weight:700;color:#ffffff;background:{ORANGE};border-radius:7px;text-decoration:none;">Continue for $55/month &rarr;</a>
-        </td>
-      </tr></table>'''
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;"><tr><td align="center">
+        <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+          <td style="padding-right:10px;">
+            <a href="{dashboard_link}" style="display:inline-block;padding:12px 20px;font-family:{FONT};font-size:13px;font-weight:600;color:{NAVY};background:#F1F2F4;border-radius:7px;text-decoration:none;">See what you're missing &rarr;</a>
+          </td>
+          <td>
+            <a href="{renew_link}" style="display:inline-block;padding:12px 20px;font-family:{FONT};font-size:13px;font-weight:700;color:#ffffff;background:{ORANGE};border-radius:7px;text-decoration:none;">Continue for $55/month &rarr;</a>
+          </td>
+        </tr></table>
+      </td></tr></table>'''
     return _wrap("MakeBank", f"Before you go — {lga_name}", "", body, _standard_footer(unsubscribe_link))

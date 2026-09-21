@@ -121,7 +121,7 @@ def _send_day1(r: dict, now: dt.datetime):
         subject = f"Rick added you to MakeBank — free {lga['name']} data"
     else:
         html = build_day1_published_email_html(
-            r["principal_name"], r["principal_name"], lga["name"], r["source_url"] or "",
+            r["principal_name"], r.get("agency") or r["principal_name"], lga["name"], r["source_url"] or "",
             DASHBOARD_BASE_URL, r["lga_id"], r["id"],
             unsubscribe_link, BUSINESS_NAME, BUSINESS_ADDRESS, BUSINESS_ABN,
         )
@@ -138,7 +138,7 @@ def send_day1_immediate(recipient_id: str):
     can never double-send."""
     rows = sb_get("free_recipients", {
         "id": f"eq.{recipient_id}", "day1_sent_at": "is.null",
-        "select": "id,lga_id,principal_name,email,phone,consent_basis,source_url,unsubscribe_token",
+        "select": "id,lga_id,principal_name,agency,email,phone,consent_basis,source_url,unsubscribe_token",
     })
     if not rows:
         log.info(f"send_day1_immediate: {recipient_id} not found or already sent — skipping")
@@ -152,7 +152,7 @@ def run_day1(now: dt.datetime):
     whose immediate send (send_day1_immediate, above) never fired."""
     rows = sb_get("free_recipients", {
         "status": "eq.trial", "day1_sent_at": "is.null", "unsubscribed_at": "is.null",
-        "select": "id,lga_id,principal_name,email,phone,consent_basis,source_url,unsubscribe_token",
+        "select": "id,lga_id,principal_name,agency,email,phone,consent_basis,source_url,unsubscribe_token",
     })
     for r in rows:
         _send_day1(r, now)
