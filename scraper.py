@@ -505,7 +505,23 @@ def parse_detail(html: str, url: str) -> Optional[dict]:
     except Exception:
         pass
 
-    return {'address': address, 'agent': agent, 'agency': agency, 'url': url, 'sold_date': sold_date}
+    # property.com.au link — REA Group's own listing page links directly to
+    # its property.com.au equivalent (same company, aggregated property
+    # history). That page often already shows a real "Listed <date> by
+    # <agency>" line for the current listing, sourced from REA's own data.
+    # Found 17 Sep 2026. Pure parsing here — no extra request, no cookies
+    # needed to READ this link (property.com.au itself is separately
+    # fetched, unauthenticated, only by hydrate_new_territory.py's CSV
+    # builder — this scraper.py change never writes anything to Supabase).
+    property_url = None
+    try:
+        tag = soup.find('a', href=lambda h: h and 'property.com.au' in h)
+        if tag:
+            property_url = tag.get('href')
+    except Exception:
+        pass
+
+    return {'address': address, 'agent': agent, 'agency': agency, 'url': url, 'sold_date': sold_date, 'property_url': property_url}
 
 # ── Supabase store ────────────────────────────────────────────────────────────
 class LGAStore:
@@ -608,6 +624,22 @@ class LGAStore:
                 .select('url')
                 .eq('lga_id', self.lga_id)
                 .eq('status', 'removed')
+                .execute())
+        return {r['url'] for r in resp.data}
+
+    def get_removed_not_sold_urls(self, table: str = 'listings') -> set[str]:
+        """Listings already classified removed_not_sold — reconcile needs to
+        re-check these against sold too, not just fresh 'removed' rows.
+        Agents sometimes pull a listing while a sale is still going through
+        (under offer, waiting on contract) rather than genuinely withdrawing
+        it — that URL sits as removed_not_sold until the sale later shows
+        up in `sold`, at which point it needs to come OUT of the hotlist,
+        not stay there forever (found 18 Sep 2026 — this case was never
+        re-checked once first classified)."""
+        resp = (self.sb.table(table)
+                .select('url')
+                .eq('lga_id', self.lga_id)
+                .eq('status', 'removed_not_sold')
                 .execute())
         return {r['url'] for r in resp.data}
 
@@ -1002,8 +1034,25 @@ def run_reconcile(sb: Client, lga: dict):
             chunk = url_list[i:i+50]
             sb.table('listings').update({'status': 'removed_not_sold'}).in_('url', chunk).execute()
 
+    # Re-check EXISTING removed_not_sold rows against sold too — a listing
+    # can sit as removed_not_sold for weeks (agent pulled it while a sale
+    # was going through — under offer, waiting on contract — rather than
+    # genuinely withdrawing it) before the sale finally shows up in `sold`.
+    # Without this, once a listing was first classified removed_not_sold it
+    # was never looked at again, so it stayed on the hotlist forever even
+    # after it genuinely sold.
+    existing_wns = store.get_removed_not_sold_urls('listings')
+    wns_now_sold = existing_wns & sold_urls
+
+    if wns_now_sold:
+        url_list = list(wns_now_sold)
+        for i in range(0, len(url_list), 50):
+            chunk = url_list[i:i+50]
+            sb.table('listings').update({'status': 'sold'}).eq('lga_id', lga_id).in_('url', chunk).execute()
+        log.info(f"  → {len(wns_now_sold)} previously-WNS listing(s) now confirmed sold — removed from hotlist")
+
     duration = time.time() - t_start
-    store.log_run('reconcile', 0, len(removed_not_sold), len(removed_sold), 'ok', '', duration)
+    store.log_run('reconcile', len(wns_now_sold), len(removed_not_sold), len(removed_sold), 'ok', '', duration)
     log.info(f"Reconcile complete in {duration:.1f}s")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
