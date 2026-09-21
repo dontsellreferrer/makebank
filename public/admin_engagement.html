@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MakeBank — Trial engagement</title>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700;800&family=Inter:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+:root{
+  --bg:#0A0E16; --bg-2:#10151F; --cream:#F5F3EF;
+  --muted:rgba(245,243,239,0.52); --muted-2:rgba(245,243,239,0.32);
+  --hairline:rgba(245,243,239,0.10); --hairline-2:rgba(245,243,239,0.16);
+  --orange:#F68408; --green:#16A34A; --red:#E05252; --amber:#D97706;
+}
+body{font-family:'Inter',sans-serif;font-weight:300;color:var(--cream);background:var(--bg);line-height:1.6;}
+h1{font-family:'Poppins',sans-serif;letter-spacing:-0.02em;}
+.wrap{max-width:960px;margin:0 auto;padding:0 32px;}
+@media(max-width:700px){.wrap{padding:0 18px;}}
+.nav{padding:20px 0;border-bottom:1px solid var(--hairline);}
+.nav .wrap{display:flex;align-items:center;justify-content:space-between;}
+.nav-badge{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted-2);border:1px solid var(--hairline-2);padding:4px 10px;border-radius:999px;}
+.head{padding:40px 0 8px;}
+.head h1{font-size:clamp(24px,3.4vw,32px);font-weight:700;}
+.head p{font-size:13px;font-weight:300;color:var(--muted);margin-top:10px;max-width:520px;}
+.lookup{padding:24px 0;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;}
+.f-field label{display:block;font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:500;color:var(--muted-2);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;}
+.f-field input{background:var(--bg-2);border:1px solid var(--hairline-2);border-radius:6px;padding:12px 14px;font-size:14px;color:var(--cream);outline:none;width:160px;}
+.f-field input:focus{border-color:var(--orange);}
+.btn{background:var(--orange);color:#0A0E16;font-weight:600;font-size:13px;padding:13px 22px;border-radius:6px;border:none;cursor:pointer;}
+.btn:hover{background:#FF9A2B;}
+table{width:100%;border-collapse:collapse;margin:20px 0 60px;font-size:13px;}
+th{text-align:left;font-family:'IBM Plex Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted-2);padding:10px 12px;border-bottom:1px solid var(--hairline-2);}
+td{padding:12px;border-bottom:1px solid var(--hairline);}
+tr:hover td{background:rgba(255,255,255,0.02);}
+.status-pill{font-size:10px;font-weight:700;padding:3px 9px;border-radius:999px;text-transform:uppercase;letter-spacing:0.04em;}
+.status-trial{background:rgba(217,119,6,0.15);color:var(--amber);}
+.status-converted{background:rgba(22,163,74,0.15);color:var(--green);}
+.status-cancelled{background:rgba(224,82,82,0.15);color:var(--red);}
+.status-unsub{background:rgba(255,255,255,0.08);color:var(--muted);}
+.empty,.err{padding:20px 0;font-size:13px;color:var(--muted-2);}
+.err{color:var(--red);}
+</style>
+</head>
+<body>
+
+<div class="nav"><div class="wrap">
+  <div style="font-family:'Poppins',sans-serif;font-weight:700;">makebank!</div>
+  <div class="nav-badge">Internal — not linked publicly</div>
+</div></div>
+
+<div class="head"><div class="wrap">
+  <h1>Trial engagement.</h1>
+  <p>Per-region view of every free recipient — signed-up date, trial expiry, status, and email engagement (last opened, total opens).</p>
+</div></div>
+
+<div class="wrap">
+  <div class="lookup">
+    <div class="f-field"><label for="lga-input">LGA number</label><input type="number" id="lga-input" placeholder="e.g. 51"></div>
+    <button class="btn" onclick="loadEngagement()">Load</button>
+  </div>
+  <div id="result"></div>
+</div>
+
+<script>
+const CONFIG = {
+  supabaseUrl: 'https://axmzkjqywpbhxrvshbkf.supabase.co',
+  supabaseKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF4bXpranF5d3BiaHhydnNoYmtmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgzMTI1OTMsImV4cCI6MjA5Mzg4ODU5M30.k2DRavwWm6gtg7qPdEAoNa5uYPhdguyW7ILy6fZ0V9w',
+};
+
+async function sbGet(table, params) {
+  const r = await fetch(`${CONFIG.supabaseUrl}/rest/v1/${table}?${params}`, {
+    headers: { 'apikey': CONFIG.supabaseKey, 'Authorization': `Bearer ${CONFIG.supabaseKey}` },
+  });
+  if (!r.ok) throw new Error(`${table} fetch failed: ${r.status}`);
+  return r.json();
+}
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+function fmtDateTime(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+function statusPill(r) {
+  if (r.unsubscribed_at) return `<span class="status-pill status-unsub">Unsubscribed</span>`;
+  const map = { trial: 'status-trial', converted: 'status-converted', cancelled: 'status-cancelled' };
+  return `<span class="status-pill ${map[r.status] || ''}">${r.status}</span>`;
+}
+
+async function loadEngagement() {
+  const lgaId = document.getElementById('lga-input').value;
+  const resultEl = document.getElementById('result');
+  if (!lgaId) { resultEl.innerHTML = '<div class="err">Enter an LGA number first.</div>'; return; }
+
+  resultEl.innerHTML = '<div class="empty">Loading&hellip;</div>';
+  try {
+    const recipients = await sbGet('free_recipients',
+      `lga_id=eq.${lgaId}&select=id,principal_name,created_at,trial_ends_at,status,unsubscribed_at&order=created_at.desc`);
+
+    if (!recipients.length) {
+      resultEl.innerHTML = '<div class="empty">No recipients for this region yet.</div>';
+      return;
+    }
+
+    // One events query for every recipient on this page, aggregated
+    // client-side — same approach the dashboard already uses for its own
+    // tallies, and keeps this page to two requests total regardless of how
+    // many recipients a region has.
+    const ids = recipients.map(r => r.id);
+    const events = await sbGet('email_events',
+      `recipient_id=in.(${ids.join(',')})&event_type=eq.opened&select=recipient_id,occurred_at&order=occurred_at.desc`);
+
+    const opensByRecipient = {};
+    for (const e of events) {
+      if (!opensByRecipient[e.recipient_id]) opensByRecipient[e.recipient_id] = [];
+      opensByRecipient[e.recipient_id].push(e.occurred_at);
+    }
+
+    resultEl.innerHTML = `<table>
+      <tr><th>Principal</th><th>Status</th><th>Signed up</th><th>Trial expiry</th><th>Last opened</th><th>Opens</th></tr>
+      ${recipients.map(r => {
+        const opens = opensByRecipient[r.id] || [];
+        return `<tr>
+          <td>${r.principal_name}</td>
+          <td>${statusPill(r)}</td>
+          <td>${fmtDate(r.created_at)}</td>
+          <td>${fmtDate(r.trial_ends_at)}</td>
+          <td>${opens.length ? fmtDateTime(opens[0]) : '—'}</td>
+          <td>${opens.length}</td>
+        </tr>`;
+      }).join('')}
+    </table>`;
+  } catch (err) {
+    console.error(err);
+    resultEl.innerHTML = `<div class="err">${err.message || 'Something went wrong.'}</div>`;
+  }
+}
+</script>
+</body>
+</html>

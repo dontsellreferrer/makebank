@@ -93,8 +93,8 @@ form{padding:40px 0 60px;}
 
     <div class="region-panel active" id="panel-existing">
       <div class="f-field">
-        <label for="existing-lga">Region</label>
-        <select id="existing-lga"><option value="">Loading&hellip;</option></select>
+        <label for="existing-lga">LGA number</label>
+        <input type="number" id="existing-lga" placeholder="e.g. 51">
       </div>
       <div class="existing-list" id="existing-principals"></div>
     </div>
@@ -116,6 +116,21 @@ form{padding:40px 0 60px;}
     </div>
     <div class="f-field"><label for="email">Email</label><input type="email" id="email" required placeholder="jane@agency.com.au"></div>
   </div>
+
+  <div class="f-section">
+    <div class="f-section-title">Consent basis</div>
+    <div class="f-hint" style="margin-bottom:10px;">Spam Act 2003 requires a basis for every commercial email — spoken agreement, or the conspicuous-publication inferred-consent provision (Schedule 2, clause 4) for a publicly listed business email.</div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--cream);cursor:pointer;margin-bottom:10px;">
+      <input type="checkbox" id="consent-spoken" checked onchange="toggleConsentFields()" style="width:16px;height:16px;">
+      Spoken to directly — they said yes
+    </label>
+    <div class="f-field" id="consent-url-field" style="display:none;">
+      <label for="consent-source-url">Where the email is published</label>
+      <input type="url" id="consent-source-url" placeholder="https://www.agencyname.com.au/agents/jane-smith">
+      <div class="f-hint">Kept as evidence the address was conspicuously published in a real-estate context, per clause 4.</div>
+    </div>
+  </div>
+
 
   <button type="submit" class="btn btn-primary" id="submit-btn">Add recipient</button>
   <div class="status-msg" id="status-msg"></div>
@@ -209,14 +224,20 @@ async function loadExistingPrincipals(lgaId) {
 }
 
 async function loadLgas() {
-  const rows = await sbGet('lgas', 'select=id,name&order=name.asc');
-  const options = '<option value="">Select a region&hellip;</option>' + rows.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
-
-  const sel = document.getElementById('existing-lga');
-  sel.innerHTML = options;
-  sel.addEventListener('change', () => loadExistingPrincipals(sel.value));
+  // No longer preloads a dropdown -- the LGA number is typed directly (same
+  // pattern as the CSV import field below), which scales past however many
+  // hundred territories this grows into. Just wire the "show existing
+  // principals for this region" lookup to the number field instead.
+  const input = document.getElementById('existing-lga');
+  input.addEventListener('change', () => loadExistingPrincipals(input.value));
 }
 loadLgas();
+
+function toggleConsentFields() {
+  const spoken = document.getElementById('consent-spoken').checked;
+  document.getElementById('consent-url-field').style.display = spoken ? 'none' : 'block';
+  document.getElementById('consent-source-url').required = !spoken;
+}
 
 function showImportStatus(msg, ok) {
   const el = document.getElementById('import-status-msg');
@@ -275,10 +296,15 @@ document.getElementById('admin-form').addEventListener('submit', async (e) => {
     const phone = document.getElementById('phone').value.trim();
     const email = document.getElementById('email').value.trim();
 
+    const spoken = document.getElementById('consent-spoken').checked;
+    const source_url = document.getElementById('consent-source-url').value.trim();
+    if (!spoken && !source_url) throw new Error('Add the URL the email address is published at, or check "Spoken to directly".');
+    const consent_basis = spoken ? 'spoken' : 'published_email';
+
     let lga_id;
     if (regionMode === 'existing') {
       lga_id = document.getElementById('existing-lga').value;
-      if (!lga_id) throw new Error('Pick a region first.');
+      if (!lga_id) throw new Error('Enter an LGA number first.');
     } else {
       const name = document.getElementById('new-region-name').value.trim();
       const url = document.getElementById('new-region-url').value.trim();
@@ -295,10 +321,29 @@ document.getElementById('admin-form').addEventListener('submit', async (e) => {
 
     const [recipient] = await sbInsert('free_recipients', [{
       lga_id, principal_name, phone, email,
+      consent_basis, source_url: spoken ? null : source_url,
     }]);
 
-    showStatus(`Added ${principal_name} for this region. Unsubscribe token: ${recipient.unsubscribe_token}`, true);
+    // Fire the Day-1 email now rather than waiting for tomorrow's cron —
+    // best-effort: a failure here shouldn't undo the recipient add above or
+    // block the success message, but it does need to be visible so a real
+    // failure doesn't go unnoticed. `python3 send_trial_emails.py --only
+    // day1` on the VM catches anything that slips through this.
+    let day1Warning = '';
+    try {
+      const r = await fetch('/api/send-day1-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipient_id: recipient.id }),
+      });
+      if (!r.ok) day1Warning = ' (Day-1 email failed to send — check the VM backfill.)';
+    } catch {
+      day1Warning = ' (Day-1 email failed to send — check the VM backfill.)';
+    }
+
+    showStatus(`Added ${principal_name} for this region. Unsubscribe token: ${recipient.unsubscribe_token}${day1Warning}`, !day1Warning);
     document.getElementById('admin-form').reset();
+    toggleConsentFields();
     if (regionMode === 'existing') loadExistingPrincipals(document.getElementById('existing-lga').value);
 
   } catch (err) {

@@ -170,6 +170,39 @@ function addRecipient(name = '', email = '') {
 // Start with one row — defaults to the agent's own details once they're typed
 addRecipient();
 
+// Pre-fill from query params — used by the "convert your free trial" link on
+// the paywalled dashboard (dashboard.html?lga=X&recipient=Y), which points
+// here with the recipient's known details already in the URL so they can
+// review/edit rather than retype everything. Every field stays fully
+// editable — this is just a starting point, not a locked-in region: if they
+// change region_url, it creates a new territory and fires hydration exactly
+// like any other fresh signup.
+// Present only on renew links (paywall CTA, day-25/feedback emails) — lets
+// this signup flip its originating free_recipients row to 'converted' once
+// submitted, so the trial sequence stops treating an already-paying
+// customer as still on the free clock. Absent for a normal cold signup.
+const RENEWING_RECIPIENT_ID = new URLSearchParams(location.search).get('recipient_id') || null;
+
+(() => {
+  const qp = new URLSearchParams(location.search);
+  const name = qp.get('name') || '';
+  const email = qp.get('email') || '';
+  if (qp.get('name'))       document.getElementById('agent_name').value = name;
+  if (qp.get('agency'))     document.getElementById('agency').value = qp.get('agency');
+  if (qp.get('email'))      document.getElementById('email').value = email;
+  if (qp.get('phone'))      document.getElementById('phone').value = qp.get('phone');
+  if (qp.get('region_url')) document.getElementById('region_url').value = qp.get('region_url');
+  // Mirror into the first (already-created) recipient row too, since it's
+  // almost always the same person receiving their own reports.
+  if (name || email) {
+    const firstRow = document.querySelector('.recipient-row');
+    if (firstRow) {
+      if (name)  firstRow.querySelector('.recipient-name').value = name;
+      if (email) firstRow.querySelector('.recipient-email').value = email;
+    }
+  }
+})();
+
 async function sbInsert(table, rows) {
   const r = await fetch(`${CONFIG.supabaseUrl}/rest/v1/${table}`, {
     method: 'POST',
@@ -265,6 +298,19 @@ document.getElementById('order-form').addEventListener('submit', async (e) => {
       lga_id: lga.id,
       status: 'pending_payment',
     }]);
+
+    // 2b. If this signup came from a renew link, flip the originating free
+    // trial to 'converted' now — optimistic (not gated on Stripe payment
+    // actually completing), same risk tolerance the rest of this flow
+    // already accepts for territory creation/hydration. Best-effort: never
+    // block the Stripe redirect on this.
+    if (RENEWING_RECIPIENT_ID) {
+      fetch('/api/mark-converted', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipient_id: RENEWING_RECIPIENT_ID }),
+      }).catch(err => console.error('mark-converted failed (non-fatal):', err));
+    }
 
     showStatus('Territory created — redirecting to start your free trial…', true);
 
