@@ -78,6 +78,11 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
 .dir-listings-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);margin-bottom:6px;}
 .dir-listing-link{display:block;font-size:12px;color:var(--navy);text-decoration:none;padding:6px 0;border-top:.5px solid var(--border);}
 .dir-listing-link:hover{color:var(--orange);}
+.region-note{padding:10px 14px;border-bottom:.5px solid var(--border);background:var(--off);}
+.region-note-link{font-size:11px;font-weight:600;color:var(--muted);text-decoration:underline;cursor:pointer;background:none;border:none;font-family:inherit;padding:0;}
+.region-note-body{display:none;margin-top:8px;font-size:12px;color:var(--text);line-height:1.7;max-width:520px;}
+.region-note-body.show{display:block;}
+.region-note-body a{color:var(--orange);font-weight:600;}
 
 
 /* WINDOW SELECTOR — the single global toggle driving hero/hotlist/leaderboard together */
@@ -180,6 +185,8 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
 .lb-row:hover{border-color:var(--orange);}
 .lb-row-wrap .dir-detail{padding:10px 4px 14px;}
 .medal{width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:800;flex-shrink:0;}
+.rank-badge{position:relative;flex-shrink:0;}
+.crown{position:absolute;top:-8px;left:50%;transform:translateX(-50%);line-height:0;pointer-events:none;}
 .medal.gold{background:rgba(245,200,66,0.15);color:#B8960C;}
 .medal.silver{background:rgba(100,100,120,0.12);color:#7A7A8C;}
 .medal.bronze{background:rgba(180,100,40,0.12);color:#9A5A20;}
@@ -267,6 +274,14 @@ const CONFIG = {
 const URL_PARAMS = new URLSearchParams(location.search);
 if (URL_PARAMS.get('lga')) CONFIG.lgaId = URL_PARAMS.get('lga');
 if (URL_PARAMS.get('lgaName')) CONFIG.lgaName = decodeURIComponent(URL_PARAMS.get('lgaName'));
+// Free-trial links only — paid/house dashboard links carry no `recipient`
+// param at all and skip the access check entirely (see gateAndLoad below).
+// `Day=` in the URL, if present, is cosmetic only: it's what a trial email
+// uses to say "Day 15 of 30" in its copy. It is NEVER read here and plays no
+// part in the actual gate — that's the whole point of checking server-side
+// against trial_ends_at instead of trusting anything the URL claims.
+CONFIG.recipientId = URL_PARAMS.get('recipient') || null;
+let ACCESS_INFO = null; // set by gateAndLoad() below — recipient's principal_name/email/phone/region_url, used to build the "create your own region" link on the free-trial-only region note
 // NOTE: unlike the old daily-brief.html, this unified dashboard does not yet
 // support a ?date= override to lock to a historical day — the 5-window
 // system (WTD/MTD/etc.) is built around "now" throughout, and retrofitting
@@ -389,6 +404,29 @@ const WINDOW_CACHE = {}; // keyed by window -> { rns, listed:{agency,agent,total
 function medal(i) {
   return ['gold', 'silver', 'bronze', 'plain'][Math.min(i, 3)];
 }
+// Dense ranking (1, 1, 1, 2, 2, 3 — never skips a rank number, no matter how
+// many rows tie for it): rows tied on count share the same rank and medal,
+// and the next distinct count is always exactly one rank down from there —
+// not "next rank = number of rows already seen" (that's competition
+// ranking, e.g. 1,1,1,4 for a 3-way tie, which is a different thing and not
+// what we want here). `rows` must already be sorted descending by count.
+function denseRanks(rows) {
+  const ranks = [];
+  let rank = 0;
+  for (let i = 0; i < rows.length; i++) {
+    if (i > 0 && rows[i].count !== rows[i - 1].count) rank++;
+    ranks[i] = rank;
+  }
+  return ranks;
+}
+// Small, subtle — not a full illustration, just enough to mark 1st place at
+// a glance. Only ever shown for index 0.
+function crownHtml(i) {
+  if (i !== 0) return '';
+  return `<span class="crown"><svg width="12" height="9" viewBox="0 0 16 12" fill="none">
+    <path d="M1.5 4 L4 9.5 L12 9.5 L14.5 4 L10.5 6.2 L8 1 L5.5 6.2 Z" fill="#F5C842" stroke="#B8960C" stroke-width="0.5" stroke-linejoin="round"/>
+  </svg></span>`;
+}
 function pill(text, colour) {
   return `<span class="pill pill-${colour}">${text}</span>`;
 }
@@ -509,13 +547,11 @@ function showDirectory(kind) {
   directoryView = kind;
   statView = null;
   renderContent();
-  scrollTo('content-section');
 }
 function showStatList(kind) {
   statView = kind;
   directoryView = null;
   renderContent();
-  scrollTo('content-section');
 }
 
 function getLbRows() {
@@ -547,18 +583,28 @@ function renderContent() {
                 :                            `Sold — ${windowLabel(currentWindow)}`;
     titleEl.innerHTML = `<span class="sec-dot dot-orange"></span>${title}`;
     countEl.textContent = `${rows.length} listing${rows.length === 1 ? '' : 's'}`;
+    // Same rowHtml() every other list on this dashboard uses (hotlists,
+    // etc.) — bold address, numbered, agent/agency subline — rather than
+    // the bespoke directory-style markup this used before.
     bodyEl.innerHTML = rows.length === 0
       ? `<div class="sec-empty">None right now.</div>`
-      : rows.map(l => `<div class="dir-row">
-          <a class="dir-listing-link" href="${l.url || '#'}" target="_blank">${l.address || l.url || 'Listing'}</a>
-          ${(l.agent || l.agency) ? `<div class="dir-row-agency">${[l.agent, l.agency].filter(Boolean).join(' · ')}</div>` : ''}
-        </div>`).join('');
+      : rows.map((l, i) => {
+          let pills = '';
+          if (kind === 'sold' && l.first_seen && l.sold_date) {
+            const daysToSell = Math.floor((new Date(l.sold_date) - new Date(l.first_seen)) / 86400000);
+            if (daysToSell >= 0) pills = pill(`${daysToSell} days to sell`, 'green');
+          } else if (l.first_seen) {
+            pills = pill(`${dom(l.first_seen)} days on market`, 'amber');
+          }
+          return rowHtml(l, i, pills);
+        }).join('');
     return;
   }
 
   if (directoryView) {
     const kind = directoryView;
     const rows = SNAPSHOT.totalActive[kind];
+    const ranks = denseRanks(rows);
     titleEl.innerHTML = `<span class="sec-dot dot-orange"></span>${kind === 'agency' ? 'Active Agencies' : 'Active Agents'}`;
     countEl.textContent = `${rows.length} ${kind === 'agency' ? 'agencies' : 'agents'}`;
     bodyEl.innerHTML = rows.length === 0
@@ -566,9 +612,11 @@ function renderContent() {
       : rows.map((r, i) => {
           const name = kind === 'agency' ? r.agency : r.agent;
           const sub  = kind === 'agent' ? r.agency : '';
+          const rank = ranks[i];
           return `<div class="dir-row">
             <div class="dir-row-main" onclick="toggleDirRow(${i})">
-              <div>
+              <span class="rank-badge">${crownHtml(rank)}<span class="medal ${medal(rank)}">${rank + 1}</span></span>
+              <div style="flex:1;min-width:0;">
                 <div class="dir-row-name">${name || '—'}</div>
                 ${sub ? `<div class="dir-row-agency">${sub}</div>` : ''}
               </div>
@@ -606,18 +654,27 @@ function renderContent() {
   } else {
     const { rows, total, view } = getLbRows();
     const max = rows[0]?.count || 1;
+    const ranks = denseRanks(rows);
     const tab = LB_TABS.find(t => t.key === lbSel);
 
     titleEl.innerHTML = `<span class="sec-dot dot-orange"></span>${tab.label} <span style="font-weight:500;color:var(--muted);">(${windowLabel(currentWindow)})</span>`;
     countEl.textContent = `${rows.length} ${view === 'agent' ? 'agents' : 'agencies'} ranked`;
-    bodyEl.innerHTML = rows.map((r, i) => {
+
+    // Free-trial links only (CONFIG.recipientId is only set there) — a paid
+    // customer never sees this, since it's specifically the "why don't I
+    // see all my listings" objection a free-trial principal raises, and the
+    // answer is always the same: the region boundary, not a bug.
+    const regionNoteHtml = CONFIG.recipientId ? renderRegionNote() : '';
+
+    bodyEl.innerHTML = regionNoteHtml + rows.map((r, i) => {
       const name = view === 'agent' ? r.agent : r.agency;
       const sub  = view === 'agent' ? r.agency : '';
       const pct  = total ? (r.count / total * 100).toFixed(1) : '0.0';
       const bar  = Math.round(r.count / max * 100);
+      const rank = ranks[i];
       return `<div class="lb-row-wrap">
         <div class="lb-row" onclick="toggleLbRow(${i})">
-          <span class="medal ${medal(i)}">${i + 1}</span>
+          <span class="rank-badge">${crownHtml(rank)}<span class="medal ${medal(rank)}">${rank + 1}</span></span>
           <div class="lb-info">
             <div class="lb-name">${name || '—'}</div>
             ${sub ? `<div class="lb-sub">${sub}</div>` : ''}
@@ -658,9 +715,9 @@ async function fetchWindowData(win) {
   // Active Agents/Agencies directory).
   const [rns, listedRows, listedCount, soldRows, soldCount] = await Promise.all([
     sb('listings', `lga_id=eq.${lga}&status=eq.removed_not_sold&removed_at=gte.${startISO}&removed_at=lt.${endISO}&select=address,agent,agency,url,removed_at&order=removed_at.desc&limit=200`),
-    sb('listings', `lga_id=eq.${lga}&first_seen=gte.${startISO}&first_seen=lt.${endISO}&select=agent,agency,address,url&order=agent.asc&limit=5000`),
+    sb('listings', `lga_id=eq.${lga}&first_seen=gte.${startISO}&first_seen=lt.${endISO}&select=agent,agency,address,url,first_seen&order=agent.asc&limit=5000`),
     sb('listings', `lga_id=eq.${lga}&first_seen=gte.${startISO}&first_seen=lt.${endISO}&select=id`),
-    sb('sold', `lga_id=eq.${lga}&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=agent,agency,address,url&order=agent.asc&limit=5000`),
+    sb('sold', `lga_id=eq.${lga}&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=agent,agency,address,url,first_seen,sold_date&order=agent.asc&limit=5000`),
     sb('sold', `lga_id=eq.${lga}&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=id`),
   ]);
 
@@ -784,6 +841,32 @@ function renderStatGrid() {
     </div>`;
 }
 
+function toggleRegionNote() {
+  const el = document.getElementById('region-note-body');
+  if (el) el.classList.toggle('show');
+}
+// Only ever called for free-trial links (see the CONFIG.recipientId check
+// at the call site) — ACCESS_INFO is populated by gateAndLoad() before any
+// content renders, so it's always available by the time this runs.
+function renderRegionNote() {
+  const info = ACCESS_INFO || {};
+  const params = new URLSearchParams({
+    name: info.principal_name || '', email: info.email || '', phone: info.phone || '',
+    region_url: info.region_url || '', recipient_id: CONFIG.recipientId || '',
+  });
+  return `<div class="region-note">
+    <button class="region-note-link" onclick="toggleRegionNote()">Numbers look low? &rarr;</button>
+    <div class="region-note-body" id="region-note-body">
+      MakeBank only counts listings inside <strong>${CONFIG.lgaName}</strong>'s defined search area — not just
+      nearby, the exact boundary set up for this region. A listing outside that boundary won't show here or
+      count toward anyone's total, no matter how close it is.
+      <br><br>
+      Regularly listing outside this area? <a href="/order.html?${params.toString()}">Create your own region &rarr;</a>
+      covering exactly where you actually work.
+    </div>
+  </div>`;
+}
+
 function renderShellAndContent() {
   document.getElementById('layout').innerHTML = `
     <div class="section" id="content-section">
@@ -830,7 +913,7 @@ async function load() {
     sb('listings', `lga_id=eq.${lga}&status=eq.active&first_seen=lte.${days90}&select=address,agent,agency,url,first_seen&order=first_seen.asc&limit=500`),
     sb('listings', `lga_id=eq.${lga}&status=eq.active&first_seen=gte.${days90Start}&first_seen=lt.${days90End}&select=address,agent,agency,url,first_seen&order=first_seen.asc&limit=500`),
     sb('listings', `lga_id=eq.${lga}&status=eq.active&${fsboOr}&select=address,agent,agency,url,first_seen&order=first_seen.desc&limit=500`),
-    sb('listings', `lga_id=eq.${lga}&status=eq.active&select=address,agent,agency,url&order=agent.asc&limit=5000`),
+    sb('listings', `lga_id=eq.${lga}&status=eq.active&select=address,agent,agency,url,first_seen&order=agent.asc&limit=5000`),
     sb('listings', `lga_id=eq.${lga}&status=eq.active&select=id`),
   ]);
 
@@ -972,7 +1055,51 @@ function downloadCSV() {
   downloadBlob(`makebank_${safeLabel}_${today}.csv`, toCSV(headers, rows));
 }
 
-load().catch(console.error);
+// ── FREE-TRIAL PAYWALL ───────────────────────────────────────────────────────
+// Greys out the entire page and shows a "trial ended" card instead of
+// loading any data. This is the only thing standing between a bookmarked
+// link and free-forever access once a trial expires -- the check itself
+// runs server-side (main.py, service-role key) via /api/dashboard-access,
+// so it can't be bypassed by editing this page's JS or the URL.
+function renderPaywall(info) {
+  const params = new URLSearchParams({
+    name: info.principal_name || '',
+    email: info.email || '',
+    phone: info.phone || '',
+    region_url: info.region_url || '',
+    recipient_id: CONFIG.recipientId || '',
+  });
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(10,14,22,0.88);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:24px;';
+  const title = info.reason === 'unsubscribed' ? "You've unsubscribed" : 'Your free trial has ended';
+  const sub = info.reason === 'unsubscribed'
+    ? `You unsubscribed from ${info.lga_name || 'this region'}'s free data.`
+    : `Your free trial for ${info.lga_name || 'this region'} has ended — the data's still here, just locked until you continue.`;
+  overlay.innerHTML = `
+    <div style="max-width:420px;width:100%;background:#10151F;border:1px solid rgba(245,243,239,0.16);border-radius:14px;padding:36px 32px;text-align:center;font-family:'Inter',sans-serif;">
+      <div style="font-family:'Poppins',sans-serif;font-size:20px;font-weight:700;color:#F5F3EF;margin-bottom:10px;">${title}</div>
+      <div style="font-size:13px;font-weight:300;color:rgba(245,243,239,0.6);line-height:1.6;margin-bottom:24px;">${sub}</div>
+      <a href="/order.html?${params.toString()}" style="display:inline-block;background:#F68408;color:#0A0E16;font-weight:600;font-size:14px;padding:14px 28px;border-radius:6px;text-decoration:none;">Continue for $55/month &rarr;</a>
+    </div>`;
+  document.body.appendChild(overlay);
+  document.body.style.overflow = 'hidden';
+}
+
+async function gateAndLoad() {
+  if (!CONFIG.recipientId) { await load(); return; } // paid/house link — unchanged, no gate
+  try {
+    const r = await fetch(`/api/dashboard-access?lga=${encodeURIComponent(CONFIG.lgaId)}&recipient=${encodeURIComponent(CONFIG.recipientId)}`);
+    const info = await r.json();
+    ACCESS_INFO = info; // stashed regardless of access — the region-note "create your own region" link needs these details even on an active trial, not just the paywall
+    if (!info.access) { renderPaywall(info); return; }
+    await load();
+  } catch (e) {
+    console.error('Access check failed', e);
+    await load(); // fail open on a network/endpoint error rather than locking out a legitimate active trial
+  }
+}
+
+gateAndLoad().catch(console.error);
 </script>
 </body>
 </html>
