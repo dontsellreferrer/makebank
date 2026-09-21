@@ -1051,8 +1051,64 @@ def run_reconcile(sb: Client, lga: dict):
             sb.table('listings').update({'status': 'sold'}).eq('lga_id', lga_id).in_('url', chunk).execute()
         log.info(f"  → {len(wns_now_sold)} previously-WNS listing(s) now confirmed sold — removed from hotlist")
 
+    # Off-market sales: sold, but with NO listings row at all — not even a
+    # removed one. REA's sold feed is scraped independently of the "for
+    # sale" listings feed, so a property that was sold off-market (never
+    # ran as a public listing) still shows up in `sold` even though nothing
+    # in `listings` ever existed for it. Without this, that sale is
+    # invisible to every agent/agency's "new listings" count and the
+    # Listed leaderboard, even though it's unambiguously that agent's
+    # listing activity — same case Rick raised 20 Sep 2026: "if something
+    # is sold that never appears as listed, it's still a listing statistic
+    # for that agent and agency, we need to report it as a new listing,
+    # even if it's not active." Fixed by backfilling a `listings` row
+    # (status='sold' — it was never active — first_seen copied from the
+    # sold row's own first_seen, since there's no way to know a true
+    # original listing date for something that was never listed).
+    all_listing_urls = store.get_all_urls('listings')
+    off_market_sold_urls = sold_urls - all_listing_urls
+    backfilled = 0
+
+    if off_market_sold_urls:
+        # sold_urls is the /sold/-stripped, normalised set (see above) —
+        # map back to the raw sold.url values so we can actually query for
+        # the rows' address/agent/agency detail already sitting in `sold`.
+        raw_by_normalised = {
+            u.replace('realestate.com.au/sold/', 'realestate.com.au/'): u for u in sold_urls_raw
+        }
+        raw_urls_needed = [raw_by_normalised[u] for u in off_market_sold_urls if u in raw_by_normalised]
+
+        sold_detail_rows = []
+        for i in range(0, len(raw_urls_needed), 100):
+            chunk = raw_urls_needed[i:i+100]
+            resp = (sb.table('sold')
+                    .select('address,agent,agency,url,first_seen,sold_date')
+                    .eq('lga_id', lga_id)
+                    .in_('url', chunk)
+                    .execute())
+            sold_detail_rows.extend(resp.data)
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        backfill_records = [{
+            'lga_id': lga_id,
+            'address': r['address'],
+            'agent': r['agent'],
+            'agency': r['agency'],
+            'url': r['url'].replace('realestate.com.au/sold/', 'realestate.com.au/'),
+            'status': 'sold',
+            'first_seen': r.get('first_seen') or now_iso,
+            'last_seen': r.get('first_seen') or now_iso,
+            **({'sold_date': r['sold_date']} if r.get('sold_date') else {}),
+        } for r in sold_detail_rows]
+
+        for i in range(0, len(backfill_records), 500):
+            chunk = backfill_records[i:i+500]
+            sb.table('listings').upsert(chunk, on_conflict='url,lga_id').execute()
+        backfilled = len(backfill_records)
+        log.info(f"  → Off-market sales backfilled into listings: {backfilled} (never appeared as a listing until now)")
+
     duration = time.time() - t_start
-    store.log_run('reconcile', len(wns_now_sold), len(removed_not_sold), len(removed_sold), 'ok', '', duration)
+    store.log_run('reconcile', len(wns_now_sold) + backfilled, len(removed_not_sold), len(removed_sold), 'ok', '', duration)
     log.info(f"Reconcile complete in {duration:.1f}s")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
