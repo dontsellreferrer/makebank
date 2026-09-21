@@ -139,7 +139,27 @@ def get_all_free_tier_lga_ids() -> list[int]:
         headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
     )
     r.raise_for_status()
-    return sorted({row["lga_id"] for row in r.json()})
+    candidate_ids = sorted({row["lga_id"] for row in r.json()})
+    if not candidate_ids:
+        return []
+
+    # Bug fix (found 21 Sep 2026): this used to return every LGA with a
+    # subscribed recipient regardless of lgas.active — deactivating a
+    # region (e.g. Port Macquarie/Kempsey/Canterbury-Bankstown, never
+    # dated) did nothing to stop its daily emails, since nothing here ever
+    # checked active status at all. Filter candidate_ids down to only the
+    # LGAs that are actually still active.
+    r2 = requests.get(
+        f"{SUPABASE_URL}/rest/v1/lgas",
+        params={"id": f"in.({','.join(str(i) for i in candidate_ids)})", "active": "eq.true", "select": "id"},
+        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+    )
+    r2.raise_for_status()
+    active_ids = {row["id"] for row in r2.json()}
+    skipped = [i for i in candidate_ids if i not in active_ids]
+    if skipped:
+        log.info(f"Skipping inactive LGA(s) with subscribed recipients: {skipped}")
+    return [i for i in candidate_ids if i in active_ids]
 
 
 def main():

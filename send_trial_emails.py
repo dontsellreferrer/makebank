@@ -158,6 +158,26 @@ def run_day1(now: dt.datetime):
         _send_day1(r, now)
 
 
+def filter_to_active_lgas(rows: list[dict]) -> list[dict]:
+    """Same bug/fix as send_daily_emails.py's get_all_free_tier_lga_ids()
+    (found 21 Sep 2026): none of these four stages ever checked lgas.active,
+    so deactivating a region (e.g. one that was hydrated but never dated)
+    did nothing to stop its trial emails. Filters a list of free_recipients
+    rows (each needs an lga_id key) down to only the ones on active LGAs."""
+    if not rows:
+        return rows
+    lga_ids = sorted({r["lga_id"] for r in rows})
+    active_ids = set()
+    for i in range(0, len(lga_ids), 100):
+        chunk = lga_ids[i:i+100]
+        active_rows = sb_get("lgas", {"id": f"in.({','.join(str(i) for i in chunk)})", "active": "eq.true", "select": "id"})
+        active_ids.update(a["id"] for a in active_rows)
+    skipped_ids = [i for i in lga_ids if i not in active_ids]
+    if skipped_ids:
+        log.info(f"Skipping recipient(s) on inactive LGA(s): {skipped_ids}")
+    return [r for r in rows if r["lga_id"] in active_ids]
+
+
 def run_day3(now: dt.datetime):
     """3 days after signup — the self-serve region-boundary explainer, sent
     once per recipient (day3_sent_at). Uses created_at, not trial_ends_at,
@@ -169,7 +189,7 @@ def run_day3(now: dt.datetime):
         "created_at": f"lte.{due_by}",
         "select": "id,lga_id,principal_name,email,phone,unsubscribe_token",
     })
-    for r in rows:
+    for r in filter_to_active_lgas(rows):
         lga = get_lga(r["lga_id"])
         html = build_day3_region_email_html(
             r["principal_name"], lga["name"], DASHBOARD_BASE_URL, r["lga_id"], r["id"],
@@ -187,7 +207,7 @@ def run_day25(now: dt.datetime):
         "trial_ends_at": f"lte.{warn_by}",
         "select": "id,lga_id,principal_name,email,phone,trial_ends_at,unsubscribe_token",
     })
-    for r in rows:
+    for r in filter_to_active_lgas(rows):
         lga = get_lga(r["lga_id"])
         trial_ends = dt.datetime.fromisoformat(r["trial_ends_at"].replace("Z", "+00:00"))
         html = build_day25_warning_email_html(
@@ -203,12 +223,15 @@ def run_day25(now: dt.datetime):
 def run_expiry_cutover(now: dt.datetime):
     """The actual access cutoff — flips status once trial_ends_at has
     passed. /api/dashboard-access in main.py checks this status, not just
-    the raw date, so this flip is what locks a bookmarked dashboard link."""
+    the raw date, so this flip is what locks a bookmarked dashboard link.
+    Also skips inactive LGAs entirely — a dead region's trials shouldn't
+    even formally expire, since that flip is what queues the feedback
+    email 7 days later, and there's nothing to feed back on."""
     rows = sb_get("free_recipients", {
         "status": "eq.trial", "trial_ends_at": f"lte.{now.isoformat()}",
-        "select": "id",
+        "select": "id,lga_id",
     })
-    for r in rows:
+    for r in filter_to_active_lgas(rows):
         sb_patch("free_recipients", r["id"], {"status": "cancelled"})
         log.info(f"Recipient {r['id']} trial expired — status set to cancelled")
 
@@ -220,7 +243,7 @@ def run_feedback(now: dt.datetime):
         "trial_ends_at": f"lte.{feedback_due_by}",
         "select": "id,lga_id,principal_name,email,phone,unsubscribe_token",
     })
-    for r in rows:
+    for r in filter_to_active_lgas(rows):
         lga = get_lga(r["lga_id"])
         html = build_feedback_email_html(
             r["principal_name"], lga["name"], DASHBOARD_BASE_URL, r["lga_id"], r["id"],
