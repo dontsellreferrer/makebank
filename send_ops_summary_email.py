@@ -62,9 +62,9 @@ def get_latest_runs(cutoff_iso: str) -> dict:
     first (= most recent) row per (lga_id, run_type) pair — far cheaper
     than a query per region per run type."""
     rows = sb_get("runs", {
-        "created_at": f"gte.{cutoff_iso}",
-        "select": "lga_id,run_type,status,error_msg,created_at",
-        "order": "created_at.desc",
+        "run_at": f"gte.{cutoff_iso}",
+        "select": "lga_id,run_type,status,error_msg,run_at",
+        "order": "run_at.desc",
         "limit": "3000",
     })
     latest = {}
