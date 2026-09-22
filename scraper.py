@@ -1104,7 +1104,13 @@ def run_reconcile(sb: Client, lga: dict):
                 'status': 'sold',
                 'first_seen': r.get('first_seen') or now_iso,
                 'last_seen': r.get('first_seen') or now_iso,
-                **({'sold_date': r['sold_date']} if r.get('sold_date') else {}),
+                # NOTE: no sold_date here — that column exists on the `sold`
+                # table (which already has this exact row, that's where
+                # sold_detail_rows came from) but NOT on `listings`. Found
+                # 23 Sep 2026: including it here made every single night's
+                # reconcile fail with a Postgres schema error, for every
+                # region, right at the last step. status='sold' is enough
+                # to represent this row's actual state on `listings`.
             } for r in sold_detail_rows]
 
             for i in range(0, len(backfill_records), 500):
