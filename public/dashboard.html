@@ -510,6 +510,10 @@ const LB_TABS = [
   { key: 'agent_listed',  label: 'Agent Listings' },
   { key: 'agency_sold',   label: 'Agency Sales' },
   { key: 'agent_sold',    label: 'Agent Sales' },
+  { key: 'agency_fast',   label: 'Agency Fast Sales' },
+  { key: 'agent_fast',    label: 'Agent Fast Sales' },
+  { key: 'agency_offmarket', label: 'Agency Off-Market' },
+  { key: 'agent_offmarket',  label: 'Agent Off-Market' },
 ];
 
 function setMainTab(tab, btn) {
@@ -562,6 +566,10 @@ function getLbRows() {
     agent_listed:  { cat: 'listed', view: 'agent' },
     agency_sold:   { cat: 'sold',   view: 'agency' },
     agent_sold:    { cat: 'sold',   view: 'agent' },
+    agency_fast:      { cat: 'fastSales', view: 'agency' },
+    agent_fast:       { cat: 'fastSales', view: 'agent' },
+    agency_offmarket: { cat: 'offMarket', view: 'agency' },
+    agent_offmarket:  { cat: 'offMarket', view: 'agent' },
   }[lbSel];
   const cat = cache[map.cat] || { agent: [], agency: [], total: 0 };
   return { rows: cat[map.view] || [], total: cat.total || 0, view: map.view };
@@ -571,7 +579,7 @@ function renderContent() {
   const titleEl = document.getElementById('content-title');
   const countEl = document.getElementById('content-count');
   const bodyEl = document.getElementById('content-body');
-  const cache = WINDOW_CACHE[currentWindow] || { rns: [], listed: { rows: [] }, sold: { rows: [] } };
+  const cache = WINDOW_CACHE[currentWindow] || { rns: [], listed: { rows: [] }, sold: { rows: [] }, fastSales: { rows: [] }, offMarket: { rows: [] } };
 
   if (statView) {
     const kind = statView;
@@ -713,18 +721,31 @@ async function fetchWindowData(win) {
   // clicking a leaderboard entry can show its underlying properties without
   // a second query (same pattern as SNAPSHOT.totalActiveRows for the
   // Active Agents/Agencies directory).
-  const [rns, listedRows, listedCount, soldRows, soldCount] = await Promise.all([
+  // Fast Sales / Off-Market Sales both derive from listings.status='sold'
+  // rows within the window (not the `sold` table) — first_seen here is the
+  // real tracked listing date, not just "when we detected the sale", so
+  // days-on-market is accurate. off_market is only ever true on rows the
+  // reconcile backfill created (see scraper.py).
+  const [rns, listedRows, listedCount, soldRows, soldCount, soldListingsRows] = await Promise.all([
     sb('listings', `lga_id=eq.${lga}&status=eq.removed_not_sold&removed_at=gte.${startISO}&removed_at=lt.${endISO}&select=address,agent,agency,url,removed_at&order=removed_at.desc&limit=200`),
     sb('listings', `lga_id=eq.${lga}&first_seen=gte.${startISO}&first_seen=lt.${endISO}&select=agent,agency,address,url,first_seen&order=agent.asc&limit=5000`),
     sb('listings', `lga_id=eq.${lga}&first_seen=gte.${startISO}&first_seen=lt.${endISO}&select=id`),
     sb('sold', `lga_id=eq.${lga}&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=agent,agency,address,url,first_seen,sold_date&order=agent.asc&limit=5000`),
     sb('sold', `lga_id=eq.${lga}&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=id`),
+    sb('listings', `lga_id=eq.${lga}&status=eq.sold&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=agent,agency,address,url,first_seen,sold_date,off_market&limit=5000`),
   ]);
+
+  const fastSaleRows = soldListingsRows.data.filter(r =>
+    r.first_seen && r.sold_date && (new Date(r.sold_date) - new Date(r.first_seen)) / 86400000 <= 7
+  );
+  const offMarketRows = soldListingsRows.data.filter(r => r.off_market);
 
   const result = {
     rns: rns.data,
     listed: { agency: tally(listedRows.data, 'agency'), agent: tallyAgent(listedRows.data), total: listedCount.count, rows: listedRows.data },
     sold:   { agency: tally(soldRows.data, 'agency'),   agent: tallyAgent(soldRows.data),   total: soldCount.count, rows: soldRows.data },
+    fastSales:   { agency: tally(fastSaleRows, 'agency'),   agent: tallyAgent(fastSaleRows),   total: fastSaleRows.length,   rows: fastSaleRows },
+    offMarket:   { agency: tally(offMarketRows, 'agency'),  agent: tallyAgent(offMarketRows),  total: offMarketRows.length,  rows: offMarketRows },
   };
   WINDOW_CACHE[win] = result;
   return result;
@@ -798,26 +819,34 @@ function renderHero(data) {
 }
 
 function renderStatGrid() {
-  const cache = WINDOW_CACHE[currentWindow] || { rns: [], listed: { agency: [], agent: [], total: 0 }, sold: { agency: [], agent: [], total: 0 } };
+  const cache = WINDOW_CACHE[currentWindow] || {
+    rns: [], listed: { agency: [], agent: [], total: 0 }, sold: { agency: [], agent: [], total: 0 },
+    fastSales: { agency: [], agent: [], total: 0 }, offMarket: { agency: [], agent: [], total: 0 },
+  };
 
   if (mainTab === 'leaderboards') {
-    document.getElementById('stat-grid').innerHTML = `
-      <div class="stat ${lbSel === 'agency_listed' ? 'active' : ''}" id="hs-agency_listed" onclick="selectLeaderboard('agency_listed')">
-        <div class="stat-main"><span class="stat-num">${cache.listed.agency.length}</span><span class="stat-lbl">Agency Listings</span></div>
-        <div class="stat-badge badge-orange">${cache.listed.total} total</div>
-      </div>
-      <div class="stat ${lbSel === 'agent_listed' ? 'active' : ''}" id="hs-agent_listed" onclick="selectLeaderboard('agent_listed')">
-        <div class="stat-main"><span class="stat-num">${cache.listed.agent.length}</span><span class="stat-lbl">Agent Listings</span></div>
-        <div class="stat-badge badge-orange">${cache.listed.total} total</div>
-      </div>
-      <div class="stat ${lbSel === 'agency_sold' ? 'active' : ''}" id="hs-agency_sold" onclick="selectLeaderboard('agency_sold')">
-        <div class="stat-main"><span class="stat-num">${cache.sold.agency.length}</span><span class="stat-lbl">Agency Sales</span></div>
-        <div class="stat-badge badge-green">${cache.sold.total} total</div>
-      </div>
-      <div class="stat ${lbSel === 'agent_sold' ? 'active' : ''}" id="hs-agent_sold" onclick="selectLeaderboard('agent_sold')">
-        <div class="stat-main"><span class="stat-num">${cache.sold.agent.length}</span><span class="stat-lbl">Agent Sales</span></div>
-        <div class="stat-badge badge-green">${cache.sold.total} total</div>
+    // Built from LB_TABS rather than 4 (now 8) hand-written tiles — this is
+    // exactly the kind of "defined in two places, only one got updated"
+    // spot that's caused real bugs this session (the off-market sold_date
+    // column, the runs table column name). One source of truth instead.
+    const tileMeta = {
+      agency_listed:    { cat: 'listed',    view: 'agency', badge: 'badge-orange' },
+      agent_listed:     { cat: 'listed',    view: 'agent',  badge: 'badge-orange' },
+      agency_sold:      { cat: 'sold',      view: 'agency', badge: 'badge-green' },
+      agent_sold:       { cat: 'sold',      view: 'agent',  badge: 'badge-green' },
+      agency_fast:      { cat: 'fastSales', view: 'agency', badge: 'badge-orange' },
+      agent_fast:       { cat: 'fastSales', view: 'agent',  badge: 'badge-orange' },
+      agency_offmarket: { cat: 'offMarket', view: 'agency', badge: 'badge-green' },
+      agent_offmarket:  { cat: 'offMarket', view: 'agent',  badge: 'badge-green' },
+    };
+    document.getElementById('stat-grid').innerHTML = LB_TABS.map(tab => {
+      const meta = tileMeta[tab.key];
+      const c = cache[meta.cat] || { agency: [], agent: [], total: 0 };
+      return `<div class="stat ${lbSel === tab.key ? 'active' : ''}" id="hs-${tab.key}" onclick="selectLeaderboard('${tab.key}')">
+        <div class="stat-main"><span class="stat-num">${(c[meta.view] || []).length}</span><span class="stat-lbl">${tab.label}</span></div>
+        <div class="stat-badge ${meta.badge}">${c.total || 0} total</div>
       </div>`;
+    }).join('');
     return;
   }
 
@@ -982,12 +1011,15 @@ function toggleLbRow(i) {
   if (alreadyOpen) return;
 
   const { rows, view } = getLbRows();
-  const cat = lbSel.endsWith('_sold') ? 'sold' : 'listed';
+  const catMap = { agency_listed: 'listed', agent_listed: 'listed', agency_sold: 'sold', agent_sold: 'sold',
+                    agency_fast: 'fastSales', agent_fast: 'fastSales', agency_offmarket: 'offMarket', agent_offmarket: 'offMarket' };
+  const cat = catMap[lbSel] || 'listed';
   const raw = (WINDOW_CACHE[currentWindow]?.[cat]?.rows) || [];
   const r = rows[i];
   const name = view === 'agent' ? r.agent : r.agency;
   const listings = raw.filter(l => view === 'agent' ? l.agent === name : l.agency === name);
-  const label = cat === 'sold' ? 'Sold' : 'Listed';
+  const labels = { listed: 'Listed', sold: 'Sold', fastSales: 'Fast Sales', offMarket: 'Off-Market Sales' };
+  const label = labels[cat];
 
   el.innerHTML = `
     <div class="dir-listings-title">${label} (${listings.length})</div>

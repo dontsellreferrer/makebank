@@ -1006,6 +1006,24 @@ def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]]
             process_group(key, rows)
 
 # ── Reconcile ─────────────────────────────────────────────────────────────────
+def _fetch_sold_dates(sb: Client, lga_id: int, sold_urls_raw: set, normalised_urls: set) -> dict:
+    """{normalised listings-style url: sold_date} for the given URLs, looked
+    up against the raw sold.url values (which carry /sold/ in the path).
+    Shared by the removed_sold and wns_now_sold reconcile paths."""
+    raw_by_normalised = {
+        u.replace('realestate.com.au/sold/', 'realestate.com.au/'): u for u in sold_urls_raw
+    }
+    raw_needed = [raw_by_normalised[u] for u in normalised_urls if u in raw_by_normalised]
+    result = {}
+    for i in range(0, len(raw_needed), 100):
+        chunk = raw_needed[i:i+100]
+        resp = sb.table('sold').select('url,sold_date').eq('lga_id', lga_id).in_('url', chunk).execute()
+        for r in resp.data:
+            if r.get('sold_date'):
+                result[r['url'].replace('realestate.com.au/sold/', 'realestate.com.au/')] = r['sold_date']
+    return result
+
+
 def run_reconcile(sb: Client, lga: dict):
     lga_id = lga['id']
     log.info(f"{'='*60}")
@@ -1041,6 +1059,24 @@ def run_reconcile(sb: Client, lga: dict):
                 chunk = url_list[i:i+50]
                 sb.table('listings').update({'status': 'removed_not_sold'}).in_('url', chunk).execute()
 
+        # Pre-existing bug, found 23 Sep 2026 while building fast/off-market
+        # sales reporting: removed_sold was computed and logged ("Confirmed
+        # sold: N") but NEVER actually applied as a status update -- these
+        # listings sat at status='removed' forever, invisible to the Sold
+        # leaderboard and to fast-sale detection, even though they were
+        # unambiguously confirmed sold right here every single night.
+        if removed_sold:
+            sold_dates = _fetch_sold_dates(sb, lga_id, sold_urls_raw, removed_sold)
+            url_list = list(removed_sold)
+            for i in range(0, len(url_list), 50):
+                chunk = url_list[i:i+50]
+                sb.table('listings').update({'status': 'sold'}).in_('url', chunk).execute()
+            # sold_date set per-URL (can't batch a per-row differing value
+            # through a single .update()) -- fine, removed_sold is a small
+            # nightly set, not thousands of rows.
+            for url, sd in sold_dates.items():
+                sb.table('listings').update({'sold_date': sd}).eq('lga_id', lga_id).eq('url', url).execute()
+
         # Re-check EXISTING removed_not_sold rows against sold too — a listing
         # can sit as removed_not_sold for weeks (agent pulled it while a sale
         # was going through — under offer, waiting on contract — rather than
@@ -1052,10 +1088,13 @@ def run_reconcile(sb: Client, lga: dict):
         wns_now_sold = existing_wns & sold_urls
 
         if wns_now_sold:
+            sold_dates = _fetch_sold_dates(sb, lga_id, sold_urls_raw, wns_now_sold)
             url_list = list(wns_now_sold)
             for i in range(0, len(url_list), 50):
                 chunk = url_list[i:i+50]
                 sb.table('listings').update({'status': 'sold'}).eq('lga_id', lga_id).in_('url', chunk).execute()
+            for url, sd in sold_dates.items():
+                sb.table('listings').update({'sold_date': sd}).eq('lga_id', lga_id).eq('url', url).execute()
             log.info(f"  → {len(wns_now_sold)} previously-WNS listing(s) now confirmed sold — removed from hotlist")
 
         # Off-market sales: sold, but with NO listings row at all — not even a
@@ -1104,13 +1143,8 @@ def run_reconcile(sb: Client, lga: dict):
                 'status': 'sold',
                 'first_seen': r.get('first_seen') or now_iso,
                 'last_seen': r.get('first_seen') or now_iso,
-                # NOTE: no sold_date here — that column exists on the `sold`
-                # table (which already has this exact row, that's where
-                # sold_detail_rows came from) but NOT on `listings`. Found
-                # 23 Sep 2026: including it here made every single night's
-                # reconcile fail with a Postgres schema error, for every
-                # region, right at the last step. status='sold' is enough
-                # to represent this row's actual state on `listings`.
+                'off_market': True,
+                **({'sold_date': r['sold_date']} if r.get('sold_date') else {}),
             } for r in sold_detail_rows]
 
             for i in range(0, len(backfill_records), 500):
