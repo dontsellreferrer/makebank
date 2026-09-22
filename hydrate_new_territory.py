@@ -78,7 +78,7 @@ from fastapi import FastAPI, Request, HTTPException
 # separate/duplicate implementation to drift out of sync.
 from scraper import (
     get_supabase, CookiePool, URLCollector, scrape_details_playwright,
-    run_scrape, COOKIES_FILE, MAX_PAGES,
+    run_scrape, run_reconcile, COOKIES_FILE, MAX_PAGES,
 )
 
 log = logging.getLogger("hydrate")
@@ -242,6 +242,25 @@ def hydrate(lga: dict):
         run_scrape(sb, pool, lga, 'sold', MAX_PAGES)
     except Exception as e:
         log.error(f"Sold hydration failed for {lga_name}: {e}")
+
+    # --- Seed the off-market backfill now, not on some later cron night ---
+    # At this exact point, `sold` is fully populated but `listings` is
+    # deliberately empty (the listings CSV above still needs manual dating
+    # before it's imported) -- so every sold row here genuinely has no
+    # listings counterpart yet, and reconcile's off-market logic will
+    # correctly backfill all of it as a one-time seed. Found 23 Sep 2026:
+    # without this, that exact backfill happens anyway, just silently on
+    # whatever night this region's first real nightly reconcile runs,
+    # dumping a confusing one-off spike into that night's "new listings"
+    # count instead of being a clean, understood setup step. Once the dated
+    # CSV is eventually imported, its real listings rows land on the same
+    # (url, lga_id) upsert key as these seeded rows and simply overwrite
+    # them with the correct data -- nothing needs cleaning up afterward.
+    try:
+        log.info(f"Seeding off-market backfill for {lga_name}")
+        run_reconcile(sb, lga)
+    except Exception as e:
+        log.error(f"Off-market seed reconcile failed for {lga_name}: {e}")
 
     log.info(f"Hydration complete for {lga_name}")
 
