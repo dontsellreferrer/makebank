@@ -755,7 +755,12 @@ async function fetchWindowData(win) {
 // full period behind it yet, rather than hidden entirely.
 async function selectWindow(win) {
   currentWindow = win;
-  document.querySelectorAll('.window-btn').forEach(b => b.classList.toggle('active', b.dataset.window === win));
+  // Scoped to #window-selector specifically — a bare '.window-btn' query
+  // also matches the Hot Lists/Leaderboards toggle (same class, shared
+  // styling), which have no data-window attribute at all, so it silently
+  // stripped their 'active' state on every single window switch (and on
+  // the very first load, since selectWindow('daily') runs at startup too).
+  document.querySelectorAll('#window-selector .window-btn').forEach(b => b.classList.toggle('active', b.dataset.window === win));
   renderCaveatBanner(win);
 
   document.getElementById('hero-sub').textContent = 'Loading…';
