@@ -86,7 +86,10 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
 
 
 /* WINDOW SELECTOR — the single global toggle driving hero/hotlist/leaderboard together */
-.window-selector{display:flex;flex-wrap:wrap;gap:6px;margin-top:18px;}
+.window-selector{display:flex;flex-wrap:wrap;gap:6px;}
+.hero-controls-row{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-top:18px;}
+.hero-mode-toggle{display:flex;gap:6px;flex-shrink:0;}
+.hero-mode-btn{font-weight:700;padding:8px 16px;}
 .window-selector-break{display:none;flex-basis:100%;height:0;}
 @media(max-width:480px){.window-selector-break{display:block;}}
 .window-btn{background:rgba(255,255,255,0.08);border:.5px solid rgba(255,255,255,0.14);color:rgba(255,255,255,0.6);font-size:11px;font-weight:600;padding:7px 14px;border-radius:999px;cursor:pointer;font-family:inherit;transition:all 0.12s;white-space:nowrap;flex-shrink:0;}
@@ -100,6 +103,11 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
 
 /* STAT GRID */
 .stat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:16px 24px;background:var(--white);border-bottom:1px solid var(--border);}
+.lb-view-toggle{grid-column:1/-1;display:inline-flex;background:var(--off);border:1px solid var(--border);border-radius:999px;padding:3px;margin-bottom:2px;}
+.lb-view-toggle button{font-family:'Inter',sans-serif;font-size:12px;font-weight:600;color:var(--muted);background:none;border:none;padding:7px 18px;border-radius:999px;cursor:pointer;transition:background 0.15s,color 0.15s;}
+.lb-view-toggle button.active{background:var(--orange);color:#fff;}
+.stat-grid-inner{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,1fr);gap:10px;}
+@media(min-width:640px){.stat-grid-inner{grid-template-columns:repeat(4,1fr);}}
 @media(min-width:640px){.stat-grid{grid-template-columns:repeat(4,1fr);}}
 .stat{background:var(--off);border:.5px solid var(--border);border-radius:10px;padding:12px 10px 10px;cursor:pointer;position:relative;overflow:hidden;transition:border-color 0.15s;}
 .stat-main{display:flex;flex-direction:column;align-items:flex-start;}
@@ -108,7 +116,7 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
 .stat.active::after{background:var(--orange);}
 .stat-num{font-family:'Poppins',sans-serif;font-size:22px;font-weight:700;color:var(--text);letter-spacing:-0.5px;line-height:1;margin-bottom:3px;}
 .stat.active .stat-num{color:var(--orange);}
-.stat-lbl{font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;line-height:1.3;}
+.stat-lbl{font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;width:100%;min-width:0;}
 .stat-badge{display:inline-block;font-size:9px;font-weight:600;padding:1px 6px;border-radius:999px;margin-top:4px;}
 .badge-green{background:var(--green-dim);color:var(--green);}
 .badge-red{background:var(--red-dim);color:var(--red);}
@@ -123,9 +131,6 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
 .layout-single{max-width:1200px;margin:0 auto;padding:0 24px 24px;}
 
 /* MAIN TABS */
-.main-tabs{max-width:1200px;margin:0 auto;padding:16px 24px 0;display:flex;gap:8px;}
-.main-tab{flex:1;background:var(--white);border:.5px solid var(--border);color:var(--muted);font-family:'Poppins',sans-serif;font-weight:700;font-size:13px;padding:12px;border-radius:10px;cursor:pointer;transition:all 0.12s;}
-.main-tab.active{background:var(--navy);color:var(--white);border-color:var(--navy);}
 
 /* SUB TABS + PERIOD TOGGLE (reuse lb- look, generic names) */
 .sub-tabs{display:flex;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;border-bottom:.5px solid var(--border);padding:0 8px;}
@@ -232,16 +237,17 @@ body{font-family:'Inter',sans-serif;background:var(--off);color:var(--text);min-
   <div class="hero-title"><span id="hero-title-text">Good morning</span><span id="hero-title-sep">, </span><span id="hero-territory">your territory</span></div>
   <div class="hero-sub" id="hero-sub">Loading…</div>
   <div class="hero-range" id="hero-range"></div>
-  <div class="window-selector" id="window-selector"></div>
+  <div class="hero-controls-row">
+    <div class="window-selector" id="window-selector"></div>
+    <div class="hero-mode-toggle" id="hero-mode-toggle">
+      <button class="window-btn hero-mode-btn active" id="hmt-hotlists" onclick="setMainTab('hotlists',this)">Hot Lists</button>
+      <button class="window-btn hero-mode-btn" id="hmt-leaderboards" onclick="setMainTab('leaderboards',this)">Leaderboards</button>
+    </div>
+  </div>
   <div class="hero-stats" id="hero-stats"></div>
 </div>
 
 <div class="caveat-banner" id="caveat-banner"></div>
-
-<div class="main-tabs" id="main-tabs">
-  <button class="main-tab active" onclick="setMainTab('hotlists',this)">Hot Lists</button>
-  <button class="main-tab" onclick="setMainTab('leaderboards',this)">Leaderboards</button>
-</div>
 
 <div class="stat-grid" id="stat-grid">
   <div class="loading"><span class="spinner"></span>Loading...</div>
@@ -393,7 +399,8 @@ function fmtShort(d) {
 let currentWindow  = 'daily';     // 'daily' | 'wtd' | 'last_week' | 'mtd' | 'last_month'
 let mainTab        = 'hotlists';  // 'hotlists' | 'leaderboards'
 let hotlistSel      = 'rns';      // 'rns' | 'expiring' | 'expired' | 'fsbo'
-let lbSel           = 'agency_listed'; // 'agency_listed' | 'agent_listed' | 'agency_sold' | 'agent_sold'
+let lbMetric        = 'listed';   // 'listed' | 'sold' | 'fast' | 'offmarket' — which leaderboard metric
+let lbView          = 'agency';   // 'agency' | 'agent' — separate toggle now, not baked into lbMetric (was 8 tiles, now 4 + a toggle)
 let directoryView   = null;       // null | 'agency' | 'agent' — overrides the content panel when set, cleared by switching Hot Lists/Leaderboards
 let statView        = null;       // null | 'total_active' | 'listed' | 'sold' — flat property list for a hero stat, same override mechanism as directoryView
 let LGA_CREATED_AT  = null;
@@ -506,21 +513,17 @@ function unlockDate(win) {
 
 // ── TWO-LEVEL NAV ─────────────────────────────────────────────────────────────
 const LB_TABS = [
-  { key: 'agency_listed', label: 'Agency Listings' },
-  { key: 'agent_listed',  label: 'Agent Listings' },
-  { key: 'agency_sold',   label: 'Agency Sales' },
-  { key: 'agent_sold',    label: 'Agent Sales' },
-  { key: 'agency_fast',   label: 'Agency Fast Sales' },
-  { key: 'agent_fast',    label: 'Agent Fast Sales' },
-  { key: 'agency_offmarket', label: 'Agency Off-Market' },
-  { key: 'agent_offmarket',  label: 'Agent Off-Market' },
+  { key: 'listed',    label: 'Listings',   cat: 'listed',    badge: 'badge-orange' },
+  { key: 'sold',       label: 'Sales',      cat: 'sold',      badge: 'badge-green' },
+  { key: 'fast',       label: 'Fast Sales', cat: 'fastSales', badge: 'badge-orange' },
+  { key: 'offmarket',  label: 'Off-Market', cat: 'offMarket', badge: 'badge-green' },
 ];
 
 function setMainTab(tab, btn) {
   mainTab = tab;
   directoryView = null;
   statView = null;
-  document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.hero-mode-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   renderStatGrid();
   renderContent();
@@ -530,22 +533,25 @@ function selectHotlist(key) {
   hotlistSel = key;
   directoryView = null;
   statView = null;
-  document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
-  document.getElementById('main-tabs').children[0].classList.add('active');
+  document.querySelectorAll('.hero-mode-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('hmt-hotlists').classList.add('active');
   renderStatGrid();
   renderContent();
-  scrollTo('content-section');
 }
 function selectLeaderboard(key) {
   mainTab = 'leaderboards';
-  lbSel = key;
+  lbMetric = key;
   directoryView = null;
   statView = null;
-  document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
-  document.getElementById('main-tabs').children[1].classList.add('active');
+  document.querySelectorAll('.hero-mode-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('hmt-leaderboards').classList.add('active');
   renderStatGrid();
   renderContent();
-  scrollTo('content-section');
+}
+function setLbView(view) {
+  lbView = view;
+  renderStatGrid();
+  renderContent();
 }
 function showDirectory(kind) {
   directoryView = kind;
@@ -560,19 +566,10 @@ function showStatList(kind) {
 
 function getLbRows() {
   const cache = WINDOW_CACHE[currentWindow];
-  if (!cache) return { rows: [], total: 0, view: 'agency' };
-  const map = {
-    agency_listed: { cat: 'listed', view: 'agency' },
-    agent_listed:  { cat: 'listed', view: 'agent' },
-    agency_sold:   { cat: 'sold',   view: 'agency' },
-    agent_sold:    { cat: 'sold',   view: 'agent' },
-    agency_fast:      { cat: 'fastSales', view: 'agency' },
-    agent_fast:       { cat: 'fastSales', view: 'agent' },
-    agency_offmarket: { cat: 'offMarket', view: 'agency' },
-    agent_offmarket:  { cat: 'offMarket', view: 'agent' },
-  }[lbSel];
-  const cat = cache[map.cat] || { agent: [], agency: [], total: 0 };
-  return { rows: cat[map.view] || [], total: cat.total || 0, view: map.view };
+  if (!cache) return { rows: [], total: 0, view: lbView };
+  const tab = LB_TABS.find(t => t.key === lbMetric);
+  const catObj = cache[tab.cat] || { agent: [], agency: [], total: 0 };
+  return { rows: catObj[lbView] || [], total: catObj.total || 0, view: lbView };
 }
 
 function renderContent() {
@@ -663,9 +660,9 @@ function renderContent() {
     const { rows, total, view } = getLbRows();
     const max = rows[0]?.count || 1;
     const ranks = denseRanks(rows);
-    const tab = LB_TABS.find(t => t.key === lbSel);
+    const tab = LB_TABS.find(t => t.key === lbMetric);
 
-    titleEl.innerHTML = `<span class="sec-dot dot-orange"></span>${tab.label} <span style="font-weight:500;color:var(--muted);">(${windowLabel(currentWindow)})</span>`;
+    titleEl.innerHTML = `<span class="sec-dot dot-orange"></span>${view === 'agent' ? 'Agent' : 'Agency'} ${tab.label} <span style="font-weight:500;color:var(--muted);">(${windowLabel(currentWindow)})</span>`;
     countEl.textContent = `${rows.length} ${view === 'agent' ? 'agents' : 'agencies'} ranked`;
 
     // Free-trial links only (CONFIG.recipientId is only set there) — a paid
@@ -825,28 +822,23 @@ function renderStatGrid() {
   };
 
   if (mainTab === 'leaderboards') {
-    // Built from LB_TABS rather than 4 (now 8) hand-written tiles — this is
-    // exactly the kind of "defined in two places, only one got updated"
-    // spot that's caused real bugs this session (the off-market sold_date
-    // column, the runs table column name). One source of truth instead.
-    const tileMeta = {
-      agency_listed:    { cat: 'listed',    view: 'agency', badge: 'badge-orange' },
-      agent_listed:     { cat: 'listed',    view: 'agent',  badge: 'badge-orange' },
-      agency_sold:      { cat: 'sold',      view: 'agency', badge: 'badge-green' },
-      agent_sold:       { cat: 'sold',      view: 'agent',  badge: 'badge-green' },
-      agency_fast:      { cat: 'fastSales', view: 'agency', badge: 'badge-orange' },
-      agent_fast:       { cat: 'fastSales', view: 'agent',  badge: 'badge-orange' },
-      agency_offmarket: { cat: 'offMarket', view: 'agency', badge: 'badge-green' },
-      agent_offmarket:  { cat: 'offMarket', view: 'agent',  badge: 'badge-green' },
-    };
-    document.getElementById('stat-grid').innerHTML = LB_TABS.map(tab => {
-      const meta = tileMeta[tab.key];
-      const c = cache[meta.cat] || { agency: [], agent: [], total: 0 };
-      return `<div class="stat ${lbSel === tab.key ? 'active' : ''}" id="hs-${tab.key}" onclick="selectLeaderboard('${tab.key}')">
-        <div class="stat-main"><span class="stat-num">${(c[meta.view] || []).length}</span><span class="stat-lbl">${tab.label}</span></div>
-        <div class="stat-badge ${meta.badge}">${c.total || 0} total</div>
+    // 4 metric tiles instead of the old 8 (agency/agent baked into each
+    // one) — Agent/Agency is now a separate small toggle, same pattern as
+    // the Monthly/Annual pricing toggle. Less boxy, same information.
+    document.getElementById('stat-grid').innerHTML = `
+      <div class="lb-view-toggle">
+        <button type="button" class="${lbView === 'agency' ? 'active' : ''}" onclick="setLbView('agency')">Agency</button>
+        <button type="button" class="${lbView === 'agent' ? 'active' : ''}" onclick="setLbView('agent')">Agent</button>
+      </div>
+      <div class="stat-grid-inner">
+        ${LB_TABS.map(tab => {
+          const c = cache[tab.cat] || { agency: [], agent: [], total: 0 };
+          return `<div class="stat ${lbMetric === tab.key ? 'active' : ''}" id="hs-${tab.key}" onclick="selectLeaderboard('${tab.key}')">
+            <div class="stat-main"><span class="stat-num">${(c[lbView] || []).length}</span><span class="stat-lbl">${tab.label}</span></div>
+            <div class="stat-badge ${tab.badge}">${c.total || 0} total</div>
+          </div>`;
+        }).join('')}
       </div>`;
-    }).join('');
     return;
   }
 
@@ -968,10 +960,6 @@ async function load() {
   await selectWindow('daily');
 }
 
-function scrollTo(id) {
-  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-
 // ── DIRECTORY ─────────────────────────────────────────────────────────────────
 // Opened from the Active Agencies / Active Agents hero-stat cards, rendered
 // inline by renderContent() above (see the directoryView branch) — same
@@ -1011,9 +999,7 @@ function toggleLbRow(i) {
   if (alreadyOpen) return;
 
   const { rows, view } = getLbRows();
-  const catMap = { agency_listed: 'listed', agent_listed: 'listed', agency_sold: 'sold', agent_sold: 'sold',
-                    agency_fast: 'fastSales', agent_fast: 'fastSales', agency_offmarket: 'offMarket', agent_offmarket: 'offMarket' };
-  const cat = catMap[lbSel] || 'listed';
+  const cat = LB_TABS.find(t => t.key === lbMetric).cat;
   const raw = (WINDOW_CACHE[currentWindow]?.[cat]?.rows) || [];
   const r = rows[i];
   const name = view === 'agent' ? r.agent : r.agency;
@@ -1079,8 +1065,8 @@ function downloadCSV() {
       const pct = total ? (r.count / total * 100).toFixed(1) : '0.0';
       return view === 'agent' ? [i + 1, r.agent, r.agency, r.count, pct] : [i + 1, r.agency, r.count, pct];
     });
-    const tab = LB_TABS.find(t => t.key === lbSel);
-    label = `${tab?.label || lbSel}_${currentWindow}`;
+    const tab = LB_TABS.find(t => t.key === lbMetric);
+    label = `${view}_${tab?.label || lbMetric}_${currentWindow}`;
   }
 
   const safeLabel = label.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '');
