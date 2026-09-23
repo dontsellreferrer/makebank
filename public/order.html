@@ -123,7 +123,7 @@ form{padding:48px 0 100px;}
 
   <div class="f-section" style="background:var(--bg-2);border:1px solid var(--hairline-2);border-radius:8px;padding:20px 22px;margin-bottom:32px;">
     <div class="f-section-title" style="margin-bottom:10px;">What to expect early on</div>
-    <p style="font-size:13px;font-weight:300;color:var(--muted);line-height:1.7;margin-bottom:8px;">Free for the first 30 days, then $55/month &mdash; cancel any time before the trial ends and you won&rsquo;t be charged. Your first dashboard will also look thinner than a mature territory's &mdash; that's expected, not broken:</p>
+    <p id="expect-copy" style="font-size:13px;font-weight:300;color:var(--muted);line-height:1.7;margin-bottom:8px;">$55/month, billed immediately &mdash; cancel any time. Your first dashboard will also look thinner than a mature territory's &mdash; that's expected, not broken:</p>
     <ul style="font-size:13px;font-weight:300;color:var(--muted);line-height:1.8;padding-left:18px;">
       <li>Removed-listing detection needs a few consecutive days of tracking before it can catch anything, so the first week or two of hotlists may be incomplete.</li>
       <li>Week-to-date and month-to-date figures won't be fully reliable until you've completed a full week or calendar month &mdash; Last Week and Last Month views unlock automatically once you have.</li>
@@ -131,7 +131,7 @@ form{padding:48px 0 100px;}
     </ul>
   </div>
 
-  <button type="submit" class="btn btn-primary" id="submit-btn">Start free trial</button>
+  <button type="submit" class="btn btn-primary" id="submit-btn">Subscribe — $55/month</button>
   <div class="status-msg" id="status-msg"></div>
 </form>
 
@@ -143,14 +143,21 @@ form{padding:48px 0 100px;}
 const CONFIG = {
   supabaseUrl: 'https://axmzkjqywpbhxrvshbkf.supabase.co',
   supabaseKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF4bXpranF5d3BiaHhydnNoYmtmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgzMTI1OTMsImV4cCI6MjA5Mzg4ODU5M30.k2DRavwWm6gtg7qPdEAoNa5uYPhdguyW7ILy6fZ0V9w',
-  // STRIPE SETUP: same $55/month recurring Payment Link used on the pricing
-  // page — MUST be configured with a 30-day trial period in Stripe (Payment
-  // Link creation has a "Free trial" option) so the customer isn't charged
-  // until day 30, matching the "free for 30 days" copy shown throughout this
-  // form and the pricing page. This form appends ?client_reference_id=<order
-  // id> so the Stripe webhook (see hydrate_new_territory.py) can match
-  // payment back to the order and territory it created.
-  stripePaymentLink: 'https://buy.stripe.com/REPLACE_WITH_YOUR_PAYMENT_LINK',
+  // STRIPE SETUP: three separate Payment Links, all for the same $55/month
+  // product (annual is a separate $550/year price) — see the
+  // "MODE / stripeUrl" logic further down for which one gets used and why.
+  //   - stripePaymentLinkNow: $55/month, no trial, charges immediately
+  //   - stripePaymentLinkTrial: $55/month, WITH Stripe's 30-day free trial
+  //     configured on the link itself (Payment Link creation has a "Free
+  //     trial" option) — only reached via order.html?trial=1
+  //   - stripePaymentLinkAnnual: $550/year, no trial — reached via
+  //     order.html?billing=annual
+  // All three append ?client_reference_id=<order id> so the Stripe webhook
+  // (see hydrate_new_territory.py) can match payment back to the order and
+  // territory it created.
+  stripePaymentLinkNow: 'https://buy.stripe.com/REPLACE_WITH_YOUR_PAYNOW_LINK',
+  stripePaymentLinkTrial: 'https://buy.stripe.com/REPLACE_WITH_YOUR_TRIAL_LINK',
+  stripePaymentLinkAnnual: 'https://buy.stripe.com/REPLACE_WITH_YOUR_ANNUAL_LINK',
 };
 
 let recipientCount = 0;
@@ -182,6 +189,39 @@ addRecipient();
 // submitted, so the trial sequence stops treating an already-paying
 // customer as still on the free clock. Absent for a normal cold signup.
 const RENEWING_RECIPIENT_ID = new URLSearchParams(location.search).get('recipient_id') || null;
+
+// MODE: three mutually exclusive states. Default (no params at all) is
+// pay-now — that's the whole point of this fix (found 21 Sep 2026): this
+// form used to talk about a free trial unconditionally, even for people who
+// never asked for one. Trial is opt-in via ?trial=1 (only reachable from
+// the separate live-demo CTA on index.html, never the main pricing card),
+// and never applies to a renewal (someone converting already had their 30
+// free days through the no-card admin flow) even if ?trial=1 is present.
+// Annual, if requested, wins over trial — there's no built "free trial
+// then annual" Payment Link, and asking for annual is itself a strong
+// enough signal the person doesn't need 30 more days to decide.
+const qpMode = new URLSearchParams(location.search);
+const IS_ANNUAL = qpMode.get('billing') === 'annual';
+const IS_TRIAL_MODE = !IS_ANNUAL && qpMode.get('trial') === '1' && !RENEWING_RECIPIENT_ID;
+
+function currentButtonLabel() {
+  if (IS_ANNUAL) return 'Subscribe — $550/year';
+  if (IS_TRIAL_MODE) return 'Start free trial';
+  return 'Subscribe — $55/month';
+}
+
+(() => {
+  // Set the "what to expect" copy and button text for the actual mode —
+  // the static HTML defaults to pay-now wording, this only overrides it
+  // for trial/annual.
+  const expectEl = document.getElementById('expect-copy');
+  if (IS_ANNUAL) {
+    expectEl.innerHTML = 'Billed $550 today for the year (equivalent to $45.83/month) &mdash; cancel any time, no partial refunds for unused months. Your first dashboard will also look thinner than a mature territory\'s &mdash; that\'s expected, not broken:';
+  } else if (IS_TRIAL_MODE) {
+    expectEl.innerHTML = 'Free for the first 30 days, then $55/month &mdash; cancel any time before the trial ends and you won\'t be charged. Your first dashboard will also look thinner than a mature territory\'s &mdash; that\'s expected, not broken:';
+  }
+  document.getElementById('submit-btn').textContent = currentButtonLabel();
+})();
 
 (() => {
   const qp = new URLSearchParams(location.search);
@@ -312,18 +352,22 @@ document.getElementById('order-form').addEventListener('submit', async (e) => {
       }).catch(err => console.error('mark-converted failed (non-fatal):', err));
     }
 
-    showStatus('Territory created — redirecting to start your free trial…', true);
+    showStatus(IS_TRIAL_MODE ? 'Territory created — redirecting to start your free trial…' : 'Territory created — redirecting to payment…', true);
 
     // 3. Off to Stripe. client_reference_id lets the webhook tie the
-    //    successful payment back to this exact order.
-    const stripeUrl = `${CONFIG.stripePaymentLink}?client_reference_id=${order.id}&prefilled_email=${encodeURIComponent(email)}`;
+    //    successful payment back to this exact order. Which link depends
+    //    on MODE, computed above from ?trial=1 / ?billing=annual.
+    const stripeBaseUrl = IS_ANNUAL ? CONFIG.stripePaymentLinkAnnual
+                         : IS_TRIAL_MODE ? CONFIG.stripePaymentLinkTrial
+                         : CONFIG.stripePaymentLinkNow;
+    const stripeUrl = `${stripeBaseUrl}?client_reference_id=${order.id}&prefilled_email=${encodeURIComponent(email)}`;
     setTimeout(() => { window.location.href = stripeUrl; }, 900);
 
   } catch (err) {
     console.error(err);
     showStatus(err.message || 'Something went wrong — please try again.', false);
     btn.disabled = false;
-    btn.textContent = 'Start free trial';
+    btn.textContent = currentButtonLabel();
   }
 });
 </script>

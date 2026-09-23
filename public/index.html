@@ -123,9 +123,14 @@ a{color:inherit;}
 .price-card{position:relative;max-width:440px;margin:0 auto;padding:1px;border-radius:14px;background:linear-gradient(155deg,rgba(246,132,8,0.35),rgba(245,243,239,0.06) 40%,rgba(245,243,239,0.03));}
 .price-card-inner{background:linear-gradient(165deg,var(--bg-3),var(--bg-2));border-radius:13px;padding:48px 40px;text-align:center;}
 .price-eyebrow{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted-2);text-transform:uppercase;letter-spacing:0.1em;}
-.price-trial-badge{display:inline-block;font-family:'Inter',sans-serif;font-size:12px;font-weight:600;color:var(--orange);background:rgba(246,132,8,0.12);border:1px solid rgba(246,132,8,0.3);padding:4px 12px;border-radius:999px;margin-top:14px;}
+.billing-toggle{display:inline-flex;background:var(--bg-3);border:1px solid var(--hairline-2);border-radius:999px;padding:3px;margin-top:16px;}
+.billing-toggle button{font-family:'Inter',sans-serif;font-size:12px;font-weight:600;color:var(--muted);background:none;border:none;padding:7px 16px;border-radius:999px;cursor:pointer;transition:background 0.15s,color 0.15s;}
+.billing-toggle button.active{background:var(--orange);color:#0A0E16;}
+.billing-toggle button .save-badge{display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#16A34A;}
+.billing-toggle button.active .save-badge{color:#0A0E16;opacity:0.75;}
 .price-amount{font-family:'Poppins',sans-serif;font-size:60px;font-weight:700;color:var(--cream);margin-top:16px;letter-spacing:-0.02em;}
 .price-amount span{font-size:16px;font-weight:300;color:var(--muted);}
+.price-sub{font-size:12px;color:var(--muted-2);margin-top:6px;min-height:16px;}
 .price-compare{font-size:13px;font-weight:300;color:var(--muted);margin-top:16px;line-height:1.6;}
 .price-list{list-style:none;text-align:left;margin-top:32px;padding-top:28px;border-top:1px solid var(--hairline);}
 .price-list li{font-size:14px;font-weight:300;color:var(--muted);padding:9px 0;}
@@ -264,8 +269,12 @@ a{color:inherit;}
     <div class="price-card">
       <div class="price-card-inner">
         <div class="price-eyebrow">Full access</div>
-        <div class="price-trial-badge">30 days free, then:</div>
-        <div class="price-amount">$55<span>/month</span></div>
+        <div class="billing-toggle">
+          <button type="button" id="toggle-monthly" class="active" onclick="setBilling('monthly')">Monthly</button>
+          <button type="button" id="toggle-annual" onclick="setBilling('annual')">Annual <span class="save-badge">2 months free</span></button>
+        </div>
+        <div class="price-amount" id="price-amount">$55<span>/month</span></div>
+        <div class="price-sub" id="price-sub"></div>
         <div class="price-compare">Other providers charge per suburb. This is your whole territory, one price.</div>
         <ul class="price-list">
           <li><strong>Your office suburb + surrounds</strong>, included</li>
@@ -289,14 +298,32 @@ a{color:inherit;}
           (recipients, region URL) before payment, and it's what seeds
           Supabase + kicks off hydration. See makebank_order.html and
           hydrate_new_territory.py.
+
+          No free-trial language on this card or its button by default —
+          this is the pay-now path. The ONLY place "30 days free" appears
+          on the site is the separate live-demo CTA further up the page,
+          which deliberately links to order.html?trial=1 instead.
         -->
-        <a href="/order.html" class="btn btn-primary">Start free trial</a>
-        <div class="price-note">Free for 30 days, then $55/month. Cancel anytime.</div>
+        <a href="/order.html" class="btn btn-primary" id="price-cta">Get started &mdash; $55/month</a>
+        <div class="price-note" id="price-note">Cancel anytime.</div>
         <div class="price-note" style="margin-top:6px;">makebank! Let&rsquo;s go.</div>
       </div>
     </div>
   </div>
 </div>
+
+<script>
+function setBilling(mode) {
+  const monthly = mode === 'monthly';
+  document.getElementById('toggle-monthly').classList.toggle('active', monthly);
+  document.getElementById('toggle-annual').classList.toggle('active', !monthly);
+  document.getElementById('price-amount').innerHTML = monthly ? '$55<span>/month</span>' : '$550<span>/year</span>';
+  document.getElementById('price-sub').textContent = monthly ? '' : 'Equivalent to $45.83/month — 2 months free';
+  document.getElementById('price-note').textContent = monthly ? 'Cancel anytime.' : 'Billed annually. Cancel anytime.';
+  document.getElementById('price-cta').textContent = monthly ? 'Get started — $55/month' : 'Get started — $550/year';
+  document.getElementById('price-cta').href = monthly ? '/order.html' : '/order.html?billing=annual';
+}
+</script>
 
 <div class="footer">
   Powered by MakeBank &middot; part of the referrer.com.au network
