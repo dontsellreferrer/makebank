@@ -713,17 +713,39 @@ def import_csv(path: str, table: str, lga_id: int, sb: Client):
                 'url': row.get('URL', ''),
                 **({'first_seen': first_seen} if first_seen else {}),
             })
-    inserted = store.insert_new(table, rows)
-    log.info(f"Imported {inserted} rows from {path} into {table} ({dated} with a real First Seen date, {inserted - dated} defaulted to today)")
 
-    # A successful listings import IS the "this territory is dated" event —
-    # flip the flag automatically rather than relying on a manual SQL step
-    # afterward (a manual step that got missed once already, letting an
-    # undated territory sit active=true overnight — see 7_lgas_dated_flag.sql).
-    # This is what actually makes the nightly cron safe to run against it.
+    # Since hydration now inserts listings immediately (first_seen =
+    # hydration time, see hydrate_new_territory.py, changed 23 Sep 2026),
+    # almost every row in a dated CSV coming back will already exist here —
+    # and cron may well have already correctly moved some of them to
+    # 'sold' or 'removed_not_sold' in the days since. insert_new() hardcodes
+    # status='active' on every row it touches, so running an already-
+    # existing row back through it would silently undo that. Existing rows
+    # only get their first_seen corrected here; genuinely new rows (a URL
+    # this LGA has never seen before) still go through insert_new() as
+    # normal, status='active' included, same as always.
+    existing_urls = store.get_all_urls(table) if table == 'listings' else set()
+    new_rows = [r for r in rows if r['url'] not in existing_urls]
+    existing_rows = [r for r in rows if r['url'] in existing_urls and r.get('first_seen')]
+
+    inserted = store.insert_new(table, new_rows)
+
+    corrected = 0
+    for r in existing_rows:
+        sb.table(table).update({'first_seen': r['first_seen']}).eq('lga_id', lga_id).eq('url', r['url']).execute()
+        corrected += 1
+
+    log.info(f"Imported {path} into {table}: {inserted} new row(s), {corrected} existing row(s) had first_seen corrected ({dated} rows in the file carried a real First Seen date)")
+
+    # A successful dated-CSV import is what actually makes this territory
+    # safe to put in front of a client -- not the same moment cron starts
+    # tracking it (dated=true, set immediately at hydration since 23 Sep
+    # 2026). client_ready is the real "verified, go ahead and send this"
+    # signal daily/trial emails gate on; dated alone was never meant to mean
+    # that, and briefly did by accident when this file only had one flag.
     if table == 'listings':
-        sb.table('lgas').update({'dated': True}).eq('id', lga_id).execute()
-        log.info(f"LGA {lga_id} marked dated=true — now eligible for the nightly cron")
+        sb.table('lgas').update({'dated': True, 'client_ready': True}).eq('id', lga_id).execute()
+        log.info(f"LGA {lga_id} marked dated=true, client_ready=true — verified and safe for client-facing surfaces")
 
 # ── Core scrape (single-pass — used directly by hydrate_new_territory.py for
 #    sold hydration; DO NOT change this function's behaviour, only add new
@@ -1006,6 +1028,24 @@ def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]]
             process_group(key, rows)
 
 # ── Reconcile ─────────────────────────────────────────────────────────────────
+def _fetch_sold_dates(sb: Client, lga_id: int, sold_urls_raw: set, normalised_urls: set) -> dict:
+    """{normalised listings-style url: sold_date} for the given URLs, looked
+    up against the raw sold.url values (which carry /sold/ in the path).
+    Shared by the removed_sold and wns_now_sold reconcile paths."""
+    raw_by_normalised = {
+        u.replace('realestate.com.au/sold/', 'realestate.com.au/'): u for u in sold_urls_raw
+    }
+    raw_needed = [raw_by_normalised[u] for u in normalised_urls if u in raw_by_normalised]
+    result = {}
+    for i in range(0, len(raw_needed), 100):
+        chunk = raw_needed[i:i+100]
+        resp = sb.table('sold').select('url,sold_date').eq('lga_id', lga_id).in_('url', chunk).execute()
+        for r in resp.data:
+            if r.get('sold_date'):
+                result[r['url'].replace('realestate.com.au/sold/', 'realestate.com.au/')] = r['sold_date']
+    return result
+
+
 def run_reconcile(sb: Client, lga: dict):
     lga_id = lga['id']
     log.info(f"{'='*60}")
@@ -1014,102 +1054,135 @@ def run_reconcile(sb: Client, lga: dict):
 
     t_start = time.time()
     store = LGAStore(sb, lga_id)
-
-    removed_listing_urls = store.get_removed_urls('listings')
-    sold_urls_raw = store.get_sold_urls()
-
-    # Listing URLs don't have /sold/ — normalise sold URLs to match before comparing
-    sold_urls = {u.replace('realestate.com.au/sold/', 'realestate.com.au/') for u in sold_urls_raw}
-
-    removed_not_sold = removed_listing_urls - sold_urls
-    removed_sold = removed_listing_urls & sold_urls
-
-    log.info(f"Removed from listings: {len(removed_listing_urls)}")
-    log.info(f"  → Confirmed sold: {len(removed_sold)}")
-    log.info(f"  → Removed NOT sold: {len(removed_not_sold)} ← dashboard hot list")
-
-    if removed_not_sold:
-        url_list = list(removed_not_sold)
-        for i in range(0, len(url_list), 50):
-            chunk = url_list[i:i+50]
-            sb.table('listings').update({'status': 'removed_not_sold'}).in_('url', chunk).execute()
-
-    # Re-check EXISTING removed_not_sold rows against sold too — a listing
-    # can sit as removed_not_sold for weeks (agent pulled it while a sale
-    # was going through — under offer, waiting on contract — rather than
-    # genuinely withdrawing it) before the sale finally shows up in `sold`.
-    # Without this, once a listing was first classified removed_not_sold it
-    # was never looked at again, so it stayed on the hotlist forever even
-    # after it genuinely sold.
-    existing_wns = store.get_removed_not_sold_urls('listings')
-    wns_now_sold = existing_wns & sold_urls
-
-    if wns_now_sold:
-        url_list = list(wns_now_sold)
-        for i in range(0, len(url_list), 50):
-            chunk = url_list[i:i+50]
-            sb.table('listings').update({'status': 'sold'}).eq('lga_id', lga_id).in_('url', chunk).execute()
-        log.info(f"  → {len(wns_now_sold)} previously-WNS listing(s) now confirmed sold — removed from hotlist")
-
-    # Off-market sales: sold, but with NO listings row at all — not even a
-    # removed one. REA's sold feed is scraped independently of the "for
-    # sale" listings feed, so a property that was sold off-market (never
-    # ran as a public listing) still shows up in `sold` even though nothing
-    # in `listings` ever existed for it. Without this, that sale is
-    # invisible to every agent/agency's "new listings" count and the
-    # Listed leaderboard, even though it's unambiguously that agent's
-    # listing activity — same case Rick raised 20 Sep 2026: "if something
-    # is sold that never appears as listed, it's still a listing statistic
-    # for that agent and agency, we need to report it as a new listing,
-    # even if it's not active." Fixed by backfilling a `listings` row
-    # (status='sold' — it was never active — first_seen copied from the
-    # sold row's own first_seen, since there's no way to know a true
-    # original listing date for something that was never listed).
-    all_listing_urls = store.get_all_urls('listings')
-    off_market_sold_urls = sold_urls - all_listing_urls
+    status = 'ok'
+    error_msg = ''
+    wns_now_sold = set()
+    removed_not_sold = set()
+    removed_sold = set()
     backfilled = 0
 
-    if off_market_sold_urls:
-        # sold_urls is the /sold/-stripped, normalised set (see above) —
-        # map back to the raw sold.url values so we can actually query for
-        # the rows' address/agent/agency detail already sitting in `sold`.
-        raw_by_normalised = {
-            u.replace('realestate.com.au/sold/', 'realestate.com.au/'): u for u in sold_urls_raw
-        }
-        raw_urls_needed = [raw_by_normalised[u] for u in off_market_sold_urls if u in raw_by_normalised]
+    try:
+        removed_listing_urls = store.get_removed_urls('listings')
+        sold_urls_raw = store.get_sold_urls()
 
-        sold_detail_rows = []
-        for i in range(0, len(raw_urls_needed), 100):
-            chunk = raw_urls_needed[i:i+100]
-            resp = (sb.table('sold')
-                    .select('address,agent,agency,url,first_seen,sold_date')
-                    .eq('lga_id', lga_id)
-                    .in_('url', chunk)
-                    .execute())
-            sold_detail_rows.extend(resp.data)
+        # Listing URLs don't have /sold/ — normalise sold URLs to match before comparing
+        sold_urls = {u.replace('realestate.com.au/sold/', 'realestate.com.au/') for u in sold_urls_raw}
 
-        now_iso = datetime.now(timezone.utc).isoformat()
-        backfill_records = [{
-            'lga_id': lga_id,
-            'address': r['address'],
-            'agent': r['agent'],
-            'agency': r['agency'],
-            'url': r['url'].replace('realestate.com.au/sold/', 'realestate.com.au/'),
-            'status': 'sold',
-            'first_seen': r.get('first_seen') or now_iso,
-            'last_seen': r.get('first_seen') or now_iso,
-            **({'sold_date': r['sold_date']} if r.get('sold_date') else {}),
-        } for r in sold_detail_rows]
+        removed_not_sold = removed_listing_urls - sold_urls
+        removed_sold = removed_listing_urls & sold_urls
 
-        for i in range(0, len(backfill_records), 500):
-            chunk = backfill_records[i:i+500]
-            sb.table('listings').upsert(chunk, on_conflict='url,lga_id').execute()
-        backfilled = len(backfill_records)
-        log.info(f"  → Off-market sales backfilled into listings: {backfilled} (never appeared as a listing until now)")
+        log.info(f"Removed from listings: {len(removed_listing_urls)}")
+        log.info(f"  → Confirmed sold: {len(removed_sold)}")
+        log.info(f"  → Removed NOT sold: {len(removed_not_sold)} ← dashboard hot list")
+
+        if removed_not_sold:
+            url_list = list(removed_not_sold)
+            for i in range(0, len(url_list), 50):
+                chunk = url_list[i:i+50]
+                sb.table('listings').update({'status': 'removed_not_sold'}).in_('url', chunk).execute()
+
+        # Pre-existing bug, found 23 Sep 2026 while building fast/off-market
+        # sales reporting: removed_sold was computed and logged ("Confirmed
+        # sold: N") but NEVER actually applied as a status update -- these
+        # listings sat at status='removed' forever, invisible to the Sold
+        # leaderboard and to fast-sale detection, even though they were
+        # unambiguously confirmed sold right here every single night.
+        if removed_sold:
+            sold_dates = _fetch_sold_dates(sb, lga_id, sold_urls_raw, removed_sold)
+            url_list = list(removed_sold)
+            for i in range(0, len(url_list), 50):
+                chunk = url_list[i:i+50]
+                sb.table('listings').update({'status': 'sold'}).in_('url', chunk).execute()
+            # sold_date set per-URL (can't batch a per-row differing value
+            # through a single .update()) -- fine, removed_sold is a small
+            # nightly set, not thousands of rows.
+            for url, sd in sold_dates.items():
+                sb.table('listings').update({'sold_date': sd}).eq('lga_id', lga_id).eq('url', url).execute()
+
+        # Re-check EXISTING removed_not_sold rows against sold too — a listing
+        # can sit as removed_not_sold for weeks (agent pulled it while a sale
+        # was going through — under offer, waiting on contract — rather than
+        # genuinely withdrawing it) before the sale finally shows up in `sold`.
+        # Without this, once a listing was first classified removed_not_sold it
+        # was never looked at again, so it stayed on the hotlist forever even
+        # after it genuinely sold.
+        existing_wns = store.get_removed_not_sold_urls('listings')
+        wns_now_sold = existing_wns & sold_urls
+
+        if wns_now_sold:
+            sold_dates = _fetch_sold_dates(sb, lga_id, sold_urls_raw, wns_now_sold)
+            url_list = list(wns_now_sold)
+            for i in range(0, len(url_list), 50):
+                chunk = url_list[i:i+50]
+                sb.table('listings').update({'status': 'sold'}).eq('lga_id', lga_id).in_('url', chunk).execute()
+            for url, sd in sold_dates.items():
+                sb.table('listings').update({'sold_date': sd}).eq('lga_id', lga_id).eq('url', url).execute()
+            log.info(f"  → {len(wns_now_sold)} previously-WNS listing(s) now confirmed sold — removed from hotlist")
+
+        # Off-market sales: sold, but with NO listings row at all — not even a
+        # removed one. REA's sold feed is scraped independently of the "for
+        # sale" listings feed, so a property that was sold off-market (never
+        # ran as a public listing) still shows up in `sold` even though nothing
+        # in `listings` ever existed for it. Without this, that sale is
+        # invisible to every agent/agency's "new listings" count and the
+        # Listed leaderboard, even though it's unambiguously that agent's
+        # listing activity — same case Rick raised 20 Sep 2026: "if something
+        # is sold that never appears as listed, it's still a listing statistic
+        # for that agent and agency, we need to report it as a new listing,
+        # even if it's not active." Fixed by backfilling a `listings` row
+        # (status='sold' — it was never active — first_seen copied from the
+        # sold row's own first_seen, since there's no way to know a true
+        # original listing date for something that was never listed).
+        all_listing_urls = store.get_all_urls('listings')
+        off_market_sold_urls = sold_urls - all_listing_urls
+
+        if off_market_sold_urls:
+            # sold_urls is the /sold/-stripped, normalised set (see above) —
+            # map back to the raw sold.url values so we can actually query for
+            # the rows' address/agent/agency detail already sitting in `sold`.
+            raw_by_normalised = {
+                u.replace('realestate.com.au/sold/', 'realestate.com.au/'): u for u in sold_urls_raw
+            }
+            raw_urls_needed = [raw_by_normalised[u] for u in off_market_sold_urls if u in raw_by_normalised]
+
+            sold_detail_rows = []
+            for i in range(0, len(raw_urls_needed), 100):
+                chunk = raw_urls_needed[i:i+100]
+                resp = (sb.table('sold')
+                        .select('address,agent,agency,url,first_seen,sold_date')
+                        .eq('lga_id', lga_id)
+                        .in_('url', chunk)
+                        .execute())
+                sold_detail_rows.extend(resp.data)
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            backfill_records = [{
+                'lga_id': lga_id,
+                'address': r['address'],
+                'agent': r['agent'],
+                'agency': r['agency'],
+                'url': r['url'].replace('realestate.com.au/sold/', 'realestate.com.au/'),
+                'status': 'sold',
+                'first_seen': r.get('first_seen') or now_iso,
+                'last_seen': r.get('first_seen') or now_iso,
+                'off_market': True,
+                **({'sold_date': r['sold_date']} if r.get('sold_date') else {}),
+            } for r in sold_detail_rows]
+
+            for i in range(0, len(backfill_records), 500):
+                chunk = backfill_records[i:i+500]
+                sb.table('listings').upsert(chunk, on_conflict='url,lga_id').execute()
+            backfilled = len(backfill_records)
+            log.info(f"  → Off-market sales backfilled into listings: {backfilled} (never appeared as a listing until now)")
+
+    except Exception as e:
+        status = 'error'
+        error_msg = str(e)
+        log.error(f"Reconcile failed for LGA {lga_id}: {e}", exc_info=True)
 
     duration = time.time() - t_start
-    store.log_run('reconcile', len(wns_now_sold) + backfilled, len(removed_not_sold), len(removed_sold), 'ok', '', duration)
-    log.info(f"Reconcile complete in {duration:.1f}s")
+    store.log_run('reconcile', len(wns_now_sold) + backfilled, len(removed_not_sold), len(removed_sold), status, error_msg, duration)
+    log.info(f"Reconcile complete in {duration:.1f}s" if status == 'ok' else f"Reconcile FAILED after {duration:.1f}s: {error_msg}")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():

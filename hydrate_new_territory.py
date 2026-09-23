@@ -2,32 +2,45 @@
 Webhook endpoint that hydrates a brand-new territory immediately after the
 order form creates it.
 
-IMPORTANT — listings are emailed as a CSV, NOT written to Supabase directly.
-A first-time scrape has no way to know how long each listing has actually
-been on the market — every property would get first_seen = today, which
-means Expiring Soon (75-90 days) and Expired (90+ days) would show nothing
-real for the first three months of a new territory. So instead:
+Listings are saved immediately (first_seen = hydration time), not left
+empty until a dated CSV comes back. Changed 23 Sep 2026 — the original
+design left `listings` completely empty and the LGA un-dated (so cron
+never ran) until Rick manually re-dated and re-imported the CSV, meaning
+anything withdrawn or sold during that gap was lost forever, never tracked.
+That's gone now: this territory is cron-eligible from the same night it's
+created, so nothing is missed regardless of how long dating actually takes
+(handing a freelancer a full day's worth of new territories no longer
+means losing days of tracking on all of them while the CSV sits in their
+queue).
+
+The tradeoff this accepts: first_seen is initially just "whenever hydration
+happened to run", not each listing's true original listing date, so
+Expiring Soon / Newly Expired / days-on-market are all approximate for this
+territory until the dated CSV corrects it. That's a real, known cost, not
+an oversight — accepted deliberately over the alternative (nothing tracked
+at all during the gap).
 
   1. Scrape every currently-active listing for the new territory (address,
-     agent, agency, URL) — but don't insert it.
-  2. Email it as a CSV to Rick, with a blank "First Seen" column.
-  3. Rick gets the real listing ages dated externally, then re-imports the
-     same CSV with that column filled in:
+     agent, agency, URL) and save it straight away.
+  2. Also email it as a CSV to Rick, with a blank "First Seen" column, for
+     him to get the real listing ages dated externally.
+  3. Once dated, re-import the same CSV:
 
        python3 scraper.py --import-csv dated_file.csv --lga <id> --import-table listings
 
-     (import_csv now reads that column and uses it as the real first_seen —
-     see scraper.py. Rows left blank just default to today's date, so a
-     partial re-date still works fine.)
+     import_csv() (see scraper.py) only corrects first_seen on rows that
+     already exist — it never touches status, so anything cron has already
+     found sold/removed/withdrawn by then is left exactly as cron set it,
+     not silently reset back to active.
 
-Sold data doesn't have this problem (sold_date is already known), so the
-sold side of hydration still writes directly to Supabase as normal.
+Sold data never had this problem (sold_date is already known), so the sold
+side of hydration writes directly to Supabase as normal, same as always.
 
 FLOW
   1. Order form inserts a row into `lgas` (see makebank_order.html).
   2. A Supabase Database Webhook fires on that INSERT and POSTs the new row
      here (see SETUP below).
-  3. Listings → scraped, emailed as CSV, NOT saved.
+  3. Listings → scraped, saved immediately, AND emailed as CSV for dating.
      Sold    → scraped and saved directly, same as any normal run.
 
 CONCURRENCY — capped at 3 (14 Sep 2026)
@@ -78,7 +91,7 @@ from fastapi import FastAPI, Request, HTTPException
 # separate/duplicate implementation to drift out of sync.
 from scraper import (
     get_supabase, CookiePool, URLCollector, scrape_details_playwright,
-    run_scrape, COOKIES_FILE, MAX_PAGES,
+    run_scrape, run_reconcile, LGAStore, COOKIES_FILE, MAX_PAGES,
 )
 
 log = logging.getLogger("hydrate")
@@ -224,15 +237,36 @@ def hydrate(lga: dict):
     # system always used.
     pool = CookiePool(COOKIES_FILE)
 
-    # --- Listings: scrape, email as CSV, do NOT save (see module docstring) ---
+    # --- Listings: scrape, save immediately, still email the CSV for dating ---
+    # Changed 23 Sep 2026: used to only email the CSV and leave `listings`
+    # completely empty until Rick re-imported it dated, which meant this
+    # territory sat fully dormant -- no cron, nothing tracked -- for however
+    # long dating took, and anything withdrawn/sold in that window was lost
+    # forever, never captured. Now: save immediately (first_seen = right
+    # now, genuinely imprecise but real) and mark the LGA dated=true straight
+    # away too, so cron picks it up from tonight regardless of when the CSV
+    # comes back. import_csv() (scraper.py) only corrects first_seen on
+    # already-existing rows when the dated CSV lands later -- it no longer
+    # touches status, so anything cron has already found sold/removed by
+    # then stays exactly as cron left it. Rick can now hand out a full
+    # day's worth of new territories to a freelancer and not worry about
+    # losing days of tracking while the CSV sits in their queue.
     try:
-        log.info(f"Hydrating listings for {lga_name} (id={lga_id}) — CSV export, not saved")
+        log.info(f"Hydrating listings for {lga_name} (id={lga_id})")
         collector = URLCollector(pool, max_pages=MAX_PAGES)
         live_urls = collector.collect_urls(lga['search_url_listings'], known_urls=set())
         log.info(f"Found {len(live_urls)} active listings")
         rows = scrape_details_playwright(list(live_urls), pool) if live_urls else []
+
+        store = LGAStore(sb, lga_id)
+        saved = store.insert_new('listings', rows)
+        log.info(f"Saved {saved} listing(s) for {lga_name} — first_seen = hydration time until the dated CSV corrects it")
+
         csv_content = build_csv(rows)
         email_csv(lga_id, lga_name, csv_content, len(rows), pool.burned_count)
+
+        sb.table('lgas').update({'dated': True}).eq('id', lga_id).execute()
+        log.info(f"LGA {lga_id} marked dated=true immediately — cron-eligible from tonight, not waiting on CSV dating")
     except Exception as e:
         log.error(f"Listings hydration failed for {lga_name}: {e}")
 
@@ -242,6 +276,22 @@ def hydrate(lga: dict):
         run_scrape(sb, pool, lga, 'sold', MAX_PAGES)
     except Exception as e:
         log.error(f"Sold hydration failed for {lga_name}: {e}")
+
+    # --- Seed the off-market backfill now, not on some later cron night ---
+    # `sold` is now fully populated and `listings` already has this
+    # territory's initial active snapshot (changed 23 Sep 2026 — see the
+    # listings block above). Reconcile's off-market check still works
+    # exactly the same: any sold URL with no matching listings row at all
+    # (i.e. it wasn't active at hydration time either) gets backfilled as
+    # off-market, same logic as every regular nightly reconcile. Doing it
+    # here rather than waiting for the first real nightly run just means
+    # this territory's dashboard is accurate from minute one instead of
+    # showing a confusing one-off spike whenever reconcile first touches it.
+    try:
+        log.info(f"Seeding off-market backfill for {lga_name}")
+        run_reconcile(sb, lga)
+    except Exception as e:
+        log.error(f"Off-market seed reconcile failed for {lga_name}: {e}")
 
     log.info(f"Hydration complete for {lga_name}")
 
