@@ -23,6 +23,7 @@ from fetch_and_build_daily_email import (
     SUPABASE_URL, SUPABASE_KEY, sb_count, sb_rows, is_fsbo, main as _unused,
 )
 from build_daily_email import build_daily_email_html
+from ops_health import get_latest_runs, lga_problems
 import datetime as dt
 
 log = logging.getLogger("send_daily_emails")
@@ -147,7 +148,6 @@ def get_all_free_tier_lga_ids() -> list[int]:
     # subscribed recipient regardless of lgas.active — deactivating a
     # region (e.g. Port Macquarie/Kempsey/Canterbury-Bankstown, never
     # dated) did nothing to stop its daily emails, since nothing here ever
-<<<<<<< HEAD
     # checked active status at all. Also requires client_ready now (added
     # 23 Sep 2026) — a brand-new territory is cron-tracked (dated=true)
     # from the night it's hydrated, but its data is still today-dated and
@@ -156,13 +156,6 @@ def get_all_free_tier_lga_ids() -> list[int]:
     r2 = requests.get(
         f"{SUPABASE_URL}/rest/v1/lgas",
         params={"id": f"in.({','.join(str(i) for i in candidate_ids)})", "active": "eq.true", "client_ready": "eq.true", "select": "id"},
-=======
-    # checked active status at all. Filter candidate_ids down to only the
-    # LGAs that are actually still active.
-    r2 = requests.get(
-        f"{SUPABASE_URL}/rest/v1/lgas",
-        params={"id": f"in.({','.join(str(i) for i in candidate_ids)})", "active": "eq.true", "select": "id"},
->>>>>>> 0dca2e483f94fa05fe2a2e2ec1b85470e5034387
         headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
     )
     r2.raise_for_status()
@@ -170,7 +163,27 @@ def get_all_free_tier_lga_ids() -> list[int]:
     skipped = [i for i in candidate_ids if i not in active_ids]
     if skipped:
         log.info(f"Skipping inactive LGA(s) with subscribed recipients: {skipped}")
-    return [i for i in candidate_ids if i in active_ids]
+    ready_ids = [i for i in candidate_ids if i in active_ids]
+
+    # Found 23 Sep 2026: a dead cookie pool took out phase1/phase2/reconcile
+    # for every live region in one night, and this would have gone
+    # straight ahead and sent every customer a Daily Brief showing 0 new
+    # listings, 0 sales, 0 everything -- reading as "the product is
+    # broken", not "nothing ran last night". Same failure check
+    # send_ops_summary_email.py already uses (shared in ops_health.py) —
+    # any region with a missing or failed run in the last 26h gets its
+    # customer-facing email held back entirely rather than sent with
+    # zeroed-out numbers. Nothing is silently lost: the next successful
+    # run's email just reflects whatever accumulated since the last real
+    # send, same as if this script simply hadn't run for a day.
+    if not ready_ids:
+        return ready_ids
+    cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=26)).isoformat()
+    latest_runs = get_latest_runs(SUPABASE_URL, SUPABASE_KEY, cutoff)
+    failed_ids = [i for i in ready_ids if lga_problems(i, latest_runs)]
+    if failed_ids:
+        log.warning(f"Holding back daily email for LGA(s) with a failed/missing scrape last night: {failed_ids}")
+    return [i for i in ready_ids if i not in failed_ids]
 
 
 def main():

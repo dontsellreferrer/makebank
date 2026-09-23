@@ -23,6 +23,8 @@ load_dotenv()
 
 import requests
 
+from ops_health import get_latest_runs as _get_latest_runs, lga_problems
+
 from fetch_and_build_daily_email import SUPABASE_URL, SUPABASE_KEY
 
 log = logging.getLogger("send_ops_summary_email")
@@ -33,8 +35,6 @@ EMAIL_FROM = __import__("os").environ.get("HYDRATE_EMAIL_FROM", "reports@makeban
 DASHBOARD_BASE_URL = __import__("os").environ.get("DASHBOARD_BASE_URL", "https://makebank.com.au/dashboard.html")
 # Rick's own inbox — this email never goes to a customer.
 OPS_REPORT_EMAIL = __import__("os").environ.get("OPS_REPORT_EMAIL", "REPLACE_WITH_OPS_EMAIL")
-
-EXPECTED_RUN_TYPES = ['listings_phase1', 'sold_phase1', 'listings_phase2', 'sold_phase2', 'reconcile']
 
 ORANGE = "#F68408"
 NAVY = "#14243D"
@@ -58,33 +58,13 @@ def get_active_lgas() -> list[dict]:
 
 
 def get_latest_runs(cutoff_iso: str) -> dict:
-    """One query for everything, most-recent-first, then keep only the
-    first (= most recent) row per (lga_id, run_type) pair — far cheaper
-    than a query per region per run type."""
-    rows = sb_get("runs", {
-        "run_at": f"gte.{cutoff_iso}",
-        "select": "lga_id,run_type,status,error_msg,run_at",
-        "order": "run_at.desc",
-        "limit": "3000",
-    })
-    latest = {}
-    for r in rows:
-        key = (r["lga_id"], r["run_type"])
-        if key not in latest:
-            latest[key] = r
-    return latest
+    return _get_latest_runs(SUPABASE_URL, SUPABASE_KEY, cutoff_iso)
 
 
 def build_region_results(lgas: list[dict], latest_runs: dict) -> list[dict]:
     results = []
     for lga in lgas:
-        problems = []
-        for run_type in EXPECTED_RUN_TYPES:
-            run = latest_runs.get((lga["id"], run_type))
-            if not run:
-                problems.append(f"{run_type}: no run found in the last 26h")
-            elif run["status"] != "ok":
-                problems.append(f"{run_type}: {run.get('error_msg') or 'failed'}")
+        problems = lga_problems(lga["id"], latest_runs)
         results.append({"lga": lga, "ok": not problems, "problems": problems})
     return results
 
