@@ -217,12 +217,29 @@ async def resend_events(request: Request):
         svix_id = request.headers.get("svix-id", "")
         svix_timestamp = request.headers.get("svix-timestamp", "")
         svix_signature = request.headers.get("svix-signature", "")
-        secret_bytes = base64.b64decode(RESEND_WEBHOOK_SECRET.split("_")[-1]) \
-            if RESEND_WEBHOOK_SECRET.startswith("whsec_") else RESEND_WEBHOOK_SECRET.encode()
-        signed_content = f"{svix_id}.{svix_timestamp}.{body.decode()}".encode()
-        expected = base64.b64encode(_hmac.new(secret_bytes, signed_content, hashlib.sha256).digest()).decode()
-        provided_sigs = [s.split(",", 1)[1] for s in svix_signature.split(" ") if "," in s]
-        if expected not in provided_sigs:
+        try:
+            # Bug found 23 Sep 2026: .split("_")[-1] only correctly strips
+            # the "whsec_" prefix when the secret itself has no other
+            # underscores in it -- if it does, this silently grabs the wrong
+            # substring, feeds invalid base64 into b64decode(), and throws
+            # an unhandled exception (a bare 500 with no detail, in
+            # production). Explicit prefix-length slicing is correct
+            # regardless of what characters the secret has.
+            secret_bytes = base64.b64decode(RESEND_WEBHOOK_SECRET.strip()[len("whsec_"):]) \
+                if RESEND_WEBHOOK_SECRET.startswith("whsec_") else RESEND_WEBHOOK_SECRET.strip().encode()
+            signed_content = f"{svix_id}.{svix_timestamp}.{body.decode()}".encode()
+            expected = base64.b64encode(_hmac.new(secret_bytes, signed_content, hashlib.sha256).digest()).decode()
+            provided_sigs = [s.split(",", 1)[1] for s in svix_signature.split(" ") if "," in s]
+            verified = expected in provided_sigs
+        except Exception as e:
+            # Fail closed but cleanly -- a 401 with a real reason beats an
+            # unhandled crash, which is exactly what happened here (bare 500,
+            # no detail) before this was wrapped. Plain print(), not a
+            # logger -- main.py has never set one up, and log.error() here
+            # would itself throw NameError and mask the real error.
+            print(f"Resend webhook signature check failed to run: {e}")
+            raise HTTPException(status_code=401, detail="Signature verification error") from e
+        if not verified:
             raise HTTPException(status_code=401, detail="Invalid signature")
 
     import json
@@ -240,8 +257,15 @@ async def resend_events(request: Request):
         return {"status": "ignored"}  # some other event type we don't track
 
     data = payload.get("data", {})
-    tags = data.get("tags") or []
-    recipient_id = next((t.get("value") for t in tags if t.get("name") == "recipient_id"), None)
+    # Confirmed via Resend's own docs and the actual crash (23 Sep 2026):
+    # data.tags is a plain {key: value} object, e.g. {"recipient_id": "xxx"}
+    # -- NOT an array of {name, value} pairs. The array-shaped version is
+    # only how tags look when you SEND an email; the webhook payload
+    # represents them differently. Iterating the old (wrong) way iterated
+    # the dict's keys (strings), and calling .get() on a string is exactly
+    # the AttributeError that was crashing every single delivery.
+    tags = data.get("tags") or {}
+    recipient_id = tags.get("recipient_id")
     if not recipient_id:
         return {"status": "ignored", "reason": "no recipient_id tag"}
 

@@ -170,23 +170,36 @@ def filter_to_active_lgas(rows: list[dict]) -> list[dict]:
     """Same bug/fix as send_daily_emails.py's get_all_free_tier_lga_ids()
     (found 21 Sep 2026): none of these four stages ever checked lgas.active,
     so deactivating a region (e.g. one that was hydrated but never dated)
+<<<<<<< HEAD
     did nothing to stop its trial emails. Also requires client_ready now
     (added 23 Sep 2026) -- a brand-new territory is cron-tracked from the
     night it's hydrated, but its data stays unverified/today-dated until
     the CSV actually comes back dated, so no trial email should go out
     before then either. Filters a list of free_recipients rows (each needs
     an lga_id key) down to only the ones on active, verified LGAs."""
+=======
+    did nothing to stop its trial emails. Filters a list of free_recipients
+    rows (each needs an lga_id key) down to only the ones on active LGAs."""
+>>>>>>> 0dca2e483f94fa05fe2a2e2ec1b85470e5034387
     if not rows:
         return rows
     lga_ids = sorted({r["lga_id"] for r in rows})
     active_ids = set()
     for i in range(0, len(lga_ids), 100):
         chunk = lga_ids[i:i+100]
+<<<<<<< HEAD
         active_rows = sb_get("lgas", {"id": f"in.({','.join(str(i) for i in chunk)})", "active": "eq.true", "client_ready": "eq.true", "select": "id"})
         active_ids.update(a["id"] for a in active_rows)
     skipped_ids = [i for i in lga_ids if i not in active_ids]
     if skipped_ids:
         log.info(f"Skipping recipient(s) on inactive/not-yet-client-ready LGA(s): {skipped_ids}")
+=======
+        active_rows = sb_get("lgas", {"id": f"in.({','.join(str(i) for i in chunk)})", "active": "eq.true", "select": "id"})
+        active_ids.update(a["id"] for a in active_rows)
+    skipped_ids = [i for i in lga_ids if i not in active_ids]
+    if skipped_ids:
+        log.info(f"Skipping recipient(s) on inactive LGA(s): {skipped_ids}")
+>>>>>>> 0dca2e483f94fa05fe2a2e2ec1b85470e5034387
     return [r for r in rows if r["lga_id"] in active_ids]
 
 

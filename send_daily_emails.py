@@ -147,6 +147,7 @@ def get_all_free_tier_lga_ids() -> list[int]:
     # subscribed recipient regardless of lgas.active — deactivating a
     # region (e.g. Port Macquarie/Kempsey/Canterbury-Bankstown, never
     # dated) did nothing to stop its daily emails, since nothing here ever
+<<<<<<< HEAD
     # checked active status at all. Also requires client_ready now (added
     # 23 Sep 2026) — a brand-new territory is cron-tracked (dated=true)
     # from the night it's hydrated, but its data is still today-dated and
@@ -155,6 +156,13 @@ def get_all_free_tier_lga_ids() -> list[int]:
     r2 = requests.get(
         f"{SUPABASE_URL}/rest/v1/lgas",
         params={"id": f"in.({','.join(str(i) for i in candidate_ids)})", "active": "eq.true", "client_ready": "eq.true", "select": "id"},
+=======
+    # checked active status at all. Filter candidate_ids down to only the
+    # LGAs that are actually still active.
+    r2 = requests.get(
+        f"{SUPABASE_URL}/rest/v1/lgas",
+        params={"id": f"in.({','.join(str(i) for i in candidate_ids)})", "active": "eq.true", "select": "id"},
+>>>>>>> 0dca2e483f94fa05fe2a2e2ec1b85470e5034387
         headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
     )
     r2.raise_for_status()

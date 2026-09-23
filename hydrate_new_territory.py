@@ -91,7 +91,11 @@ from fastapi import FastAPI, Request, HTTPException
 # separate/duplicate implementation to drift out of sync.
 from scraper import (
     get_supabase, CookiePool, URLCollector, scrape_details_playwright,
+<<<<<<< HEAD
     run_scrape, run_reconcile, LGAStore, COOKIES_FILE, MAX_PAGES,
+=======
+    run_scrape, run_reconcile, COOKIES_FILE, MAX_PAGES,
+>>>>>>> 0dca2e483f94fa05fe2a2e2ec1b85470e5034387
 )
 
 log = logging.getLogger("hydrate")
@@ -278,6 +282,7 @@ def hydrate(lga: dict):
         log.error(f"Sold hydration failed for {lga_name}: {e}")
 
     # --- Seed the off-market backfill now, not on some later cron night ---
+<<<<<<< HEAD
     # `sold` is now fully populated and `listings` already has this
     # territory's initial active snapshot (changed 23 Sep 2026 — see the
     # listings block above). Reconcile's off-market check still works
@@ -287,6 +292,20 @@ def hydrate(lga: dict):
     # here rather than waiting for the first real nightly run just means
     # this territory's dashboard is accurate from minute one instead of
     # showing a confusing one-off spike whenever reconcile first touches it.
+=======
+    # At this exact point, `sold` is fully populated but `listings` is
+    # deliberately empty (the listings CSV above still needs manual dating
+    # before it's imported) -- so every sold row here genuinely has no
+    # listings counterpart yet, and reconcile's off-market logic will
+    # correctly backfill all of it as a one-time seed. Found 23 Sep 2026:
+    # without this, that exact backfill happens anyway, just silently on
+    # whatever night this region's first real nightly reconcile runs,
+    # dumping a confusing one-off spike into that night's "new listings"
+    # count instead of being a clean, understood setup step. Once the dated
+    # CSV is eventually imported, its real listings rows land on the same
+    # (url, lga_id) upsert key as these seeded rows and simply overwrite
+    # them with the correct data -- nothing needs cleaning up afterward.
+>>>>>>> 0dca2e483f94fa05fe2a2e2ec1b85470e5034387
     try:
         log.info(f"Seeding off-market backfill for {lga_name}")
         run_reconcile(sb, lga)

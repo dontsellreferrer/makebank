@@ -62,7 +62,7 @@ tr:hover td{background:rgba(255,255,255,0.02);}
 
 <div class="head"><div class="wrap">
   <h1>Trial engagement.</h1>
-  <p>Per-region view of every free recipient — signed-up date, trial expiry, status, and email engagement (last opened, total opens).</p>
+  <p>Per-region view of every free recipient — signed-up date, trial expiry, status, and email engagement (last clicked, total clicks).</p>
 </div></div>
 
 <div class="wrap">
@@ -121,27 +121,33 @@ async function loadEngagement() {
     // client-side — same approach the dashboard already uses for its own
     // tallies, and keeps this page to two requests total regardless of how
     // many recipients a region has.
+    // Tracking clicks, not opens — opens rely on an invisible pixel that
+    // Gmail/Outlook frequently block or proxy-cache, so a real open can
+    // legitimately never fire an event at all. Clicks go through an actual
+    // URL redirect (every email already has real links — dashboard,
+    // unsubscribe), so they're a far more reliable engagement signal, not
+    // just a simpler one. Found 23 Sep 2026.
     const ids = recipients.map(r => r.id);
     const events = await sbGet('email_events',
-      `recipient_id=in.(${ids.join(',')})&event_type=eq.opened&select=recipient_id,occurred_at&order=occurred_at.desc`);
+      `recipient_id=in.(${ids.join(',')})&event_type=eq.clicked&select=recipient_id,occurred_at&order=occurred_at.desc`);
 
-    const opensByRecipient = {};
+    const clicksByRecipient = {};
     for (const e of events) {
-      if (!opensByRecipient[e.recipient_id]) opensByRecipient[e.recipient_id] = [];
-      opensByRecipient[e.recipient_id].push(e.occurred_at);
+      if (!clicksByRecipient[e.recipient_id]) clicksByRecipient[e.recipient_id] = [];
+      clicksByRecipient[e.recipient_id].push(e.occurred_at);
     }
 
     resultEl.innerHTML = `<table>
-      <tr><th>Principal</th><th>Status</th><th>Signed up</th><th>Trial expiry</th><th>Last opened</th><th>Opens</th></tr>
+      <tr><th>Principal</th><th>Status</th><th>Signed up</th><th>Trial expiry</th><th>Last clicked</th><th>Clicks</th></tr>
       ${recipients.map((r, i) => {
-        const opens = opensByRecipient[r.id] || [];
+        const clicks = clicksByRecipient[r.id] || [];
         return `<tr class="row-main" onclick="toggleRow(${i})">
           <td>${r.principal_name}</td>
           <td>${statusPill(r)}</td>
           <td>${fmtDate(r.created_at)}</td>
           <td>${fmtDate(r.trial_ends_at)}</td>
-          <td>${opens.length ? fmtDateTime(opens[0]) : '—'}</td>
-          <td>${opens.length}</td>
+          <td>${clicks.length ? fmtDateTime(clicks[0]) : '—'}</td>
+          <td>${clicks.length}</td>
         </tr>
         <tr class="detail-row"><td colspan="6"><div class="detail-body" id="detail-${i}"></div></td></tr>`;
       }).join('')}
