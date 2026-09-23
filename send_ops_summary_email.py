@@ -83,6 +83,7 @@ def build_email_html(results: list[dict]) -> str:
           <td style="padding:10px 12px;border-bottom:1px solid #eee;font-family:{FONT};font-size:13px;color:#1a1a1a;">
             <span style="color:{RED};font-weight:700;">&#10007;</span>
             <a href="{dashboard_link(r['lga'])}" style="color:{NAVY};font-weight:600;text-decoration:none;">{r['lga']['name']}</a>
+            <span style="color:#9a9a9a;font-weight:400;"> (LGA {r['lga']['id']})</span>
           </td>
           <td style="padding:10px 12px;border-bottom:1px solid #eee;font-family:{FONT};font-size:11px;color:{RED};">{detail}</td>
         </tr>'''
@@ -92,6 +93,7 @@ def build_email_html(results: list[dict]) -> str:
           <td colspan="2" style="padding:6px 12px;border-bottom:1px solid #f3f3f3;font-family:{FONT};font-size:12px;color:#4a4a4a;">
             <span style="color:{GREEN};">&#10003;</span>
             <a href="{dashboard_link(r['lga'])}" style="color:#4a4a4a;text-decoration:none;">{r['lga']['name']}</a>
+            <span style="color:#c0c0c0;"> (LGA {r['lga']['id']})</span>
           </td>
         </tr>'''
 
