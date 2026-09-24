@@ -806,11 +806,20 @@ def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages
         # Never mark removals in this case — abort to protect existing data.
         all_live_count = len(collector._last_all_live_urls)
         if known_urls and all_live_count < max(10, len(known_urls) * 0.1):
-            log.error(
+            error_msg = (
                 f"SAFETY ABORT: Phase 1 collected only {all_live_count} URLs "
                 f"vs {len(known_urls)} known. Possible scrape failure — "
                 f"skipping removal step to protect existing data."
             )
+            log.error(error_msg)
+            # Bug found 24 Sep 2026: this never set status='error', so a
+            # region that hit safety-abort (dead cookies, zero real data
+            # collected) still logged status='ok' to `runs` -- completely
+            # invisible to send_ops_summary_email.py's health check unless
+            # something ELSE also hard-crashed the same night. A night where
+            # cookies died and nothing else crashed would have reported
+            # "All 7 regions ran clean" while genuinely nothing happened.
+            status = 'error'
             removed_urls = set()  # Clear removals — do not mark anything
 
         # Phase 2: Playwright detail scrape for new URLs only
@@ -893,11 +902,13 @@ def run_scrape_phase1(sb: Client, pool: CookiePool, lga: dict, run_type: str, ma
         # (burned cookies, REA blocking, network error), not real removals.
         all_live_count = len(collector._last_all_live_urls)
         if known_urls and all_live_count < max(10, len(known_urls) * 0.1):
-            log.error(
+            error_msg = (
                 f"SAFETY ABORT: Phase 1 collected only {all_live_count} URLs "
                 f"vs {len(known_urls)} known. Possible scrape failure — "
                 f"skipping removal step to protect existing data."
             )
+            log.error(error_msg)
+            status = 'error'
             removed_urls = set()
 
         # Queue new URLs for Phase 2 rather than detail-scraping now.
