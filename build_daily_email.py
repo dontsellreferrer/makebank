@@ -36,9 +36,10 @@ def build_daily_email_html(
   <tr><td style="background:#ffffff;padding:0 26px 24px;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#FFF3E6;border-radius:10px;border:1px solid #F9D9B0;">
       <tr><td style="padding:16px 18px;">
-        <div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:700;color:#B45309;margin-bottom:4px;">Compliance that pays you</div>
-        <div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#3a3a3a;line-height:1.6;margin-bottom:12px;">CDDReady captures buyer ID at every open home automatically — compliant AUSTRAC verification that builds your buyer database while you work the room.</div>
-        <a href="https://cddready.com.au" style="display:inline-block;background:#F68408;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:700;padding:9px 18px;border-radius:7px;text-decoration:none;">Try CDDReady Free</a>
+        <div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:700;color:#B45309;margin-bottom:4px;">Still chasing AUSTRAC paperwork after the sale?</div>
+        <div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#3a3a3a;line-height:1.6;margin-bottom:10px;">CDDReady captures witnessed ID and due-diligence on both vendor and purchaser as the deal happens — an audit trail that builds itself instead of a shoebox of forms after settlement. Live buyer matching flags repeat inspections in real time, AI-powered listings intelligence spots what's worth watching, listing agents get notified instantly, and principals get the full agency picture without chasing anyone for it.</div>
+        <div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:700;font-style:italic;color:#B45309;margin-bottom:12px;">Same idea as MakeBank — real activity, surfaced the moment it happens. Compliant agents make bank.</div>
+        <a href="https://cddready.com.au" style="display:inline-block;background:#F68408;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:700;padding:9px 18px;border-radius:7px;text-decoration:none;">Explore the free interactive demo</a>
       </td></tr>
     </table>
   </td></tr>
