@@ -17,6 +17,7 @@ Usage:
 import datetime as dt
 import logging
 import urllib.parse
+import html
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -78,7 +79,15 @@ def build_email_html(results: list[dict]) -> str:
     ok = [r for r in results if r["ok"]]
 
     def failed_row(r):
-        detail = "<br>".join(r["problems"])
+        # Bug found 24 Sep 2026: raw exception text like
+        # "<ConnectionTerminated error_code:1, ...>" was inserted straight
+        # into the HTML with no escaping -- the angle brackets made the
+        # email client treat it as an unrecognised tag and silently hide it,
+        # so the report showed "reconcile:" with nothing after the colon.
+        # Escape each problem string individually, THEN join with <br> --
+        # escaping the joined result instead would also escape the <br>
+        # tags themselves and collapse every line onto one.
+        detail = "<br>".join(html.escape(p) for p in r["problems"])
         return f'''<tr>
           <td style="padding:10px 12px;border-bottom:1px solid #eee;font-family:{FONT};font-size:13px;color:#1a1a1a;">
             <span style="color:{RED};font-weight:700;">&#10007;</span>

@@ -39,6 +39,7 @@ DAILY CRON — --phase 1 / --phase 2 (added 16 Sep 2026)
     those immediately, same as the single-pass version always has.
 """
 import os, re, sys, csv, json, time, random, argparse, logging
+import httpx
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -55,7 +56,7 @@ load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)-7s %(message)s',
-    datefmt='%H:%M:%S',
+    datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
         logging.StreamHandler(sys.stdout),
         logging.FileHandler('scraper.log', encoding='utf-8'),
@@ -76,6 +77,37 @@ def get_supabase() -> Client:
     if not url or not key:
         raise EnvironmentError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in .env")
     return create_client(url, key)
+
+
+def retry_on_disconnect(fn, description: str, max_attempts: int = 3, delays=(2, 5, 10)):
+    """Retries fn() (a zero-arg callable wrapping one Supabase .execute() call)
+    on a dropped/terminated connection -- httpx.RemoteProtocolError covers
+    both "Server disconnected" and "ConnectionTerminated", the two error
+    shapes actually seen in production (24 Sep 2026). This is a general
+    safety net for transient network drops -- it does NOT fix the specific
+    bug that caused most of those (see process_lga: --parallel threads used
+    to share one Supabase client, and one HTTP/2 connection isn't safe for
+    concurrent use across threads -- fixed separately, each thread now gets
+    its own client). Only retries this one connection-level exception type;
+    anything else re-raises immediately rather than silently retrying (and
+    thereby masking) a genuinely different bug behind three retries.
+    Safe to retry blindly here because every caller of this helper is an
+    idempotent write (upsert on conflict key, or a delete/status-set keyed
+    on exact URLs) -- if the first attempt actually succeeded server-side
+    and only the client failed to see the response, repeating it is a
+    no-op, not a duplicate."""
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except httpx.RemoteProtocolError as e:
+            last_exc = e
+            if attempt == max_attempts:
+                break
+            delay = delays[min(attempt - 1, len(delays) - 1)]
+            log.warning(f"{description}: connection dropped (attempt {attempt}/{max_attempts}) — retrying in {delay}s: {e}")
+            time.sleep(delay)
+    raise last_exc
 
 # ── Cookie slot coordination ──────────────────────────────────────────────────
 # See cookie_slots_schema.sql. Both the cron's own --parallel dispatch and
@@ -534,12 +566,15 @@ class LGAStore:
         page_size = 1000
         offset = 0
         while True:
-            resp = (self.sb.table(table)
-                    .select('url')
-                    .eq('lga_id', self.lga_id)
-                    .eq('status', 'active')
-                    .range(offset, offset + page_size - 1)
-                    .execute())
+            resp = retry_on_disconnect(
+                lambda: (self.sb.table(table)
+                        .select('url')
+                        .eq('lga_id', self.lga_id)
+                        .eq('status', 'active')
+                        .range(offset, offset + page_size - 1)
+                        .execute()),
+                f"get_active_urls({table}, lga={self.lga_id})"
+            )
             batch = [r['url'] for r in resp.data]
             urls.update(batch)
             if len(batch) < page_size:
@@ -552,11 +587,14 @@ class LGAStore:
         page_size = 1000
         offset = 0
         while True:
-            resp = (self.sb.table(table)
-                    .select('url')
-                    .eq('lga_id', self.lga_id)
-                    .range(offset, offset + page_size - 1)
-                    .execute())
+            resp = retry_on_disconnect(
+                lambda: (self.sb.table(table)
+                        .select('url')
+                        .eq('lga_id', self.lga_id)
+                        .range(offset, offset + page_size - 1)
+                        .execute()),
+                f"get_all_urls({table}, lga={self.lga_id})"
+            )
             batch = [r['url'] for r in resp.data]
             urls.update(batch)
             if len(batch) < page_size:
@@ -583,7 +621,10 @@ class LGAStore:
         inserted = 0
         for i in range(0, len(records), 500):
             chunk = records[i:i+500]
-            self.sb.table(table).upsert(chunk, on_conflict='url,lga_id').execute()
+            retry_on_disconnect(
+                lambda c=chunk: self.sb.table(table).upsert(c, on_conflict='url,lga_id').execute(),
+                f"insert_new({table}, lga={self.lga_id}, chunk of {len(chunk)})"
+            )
             inserted += len(chunk)
         return inserted
 
@@ -595,11 +636,14 @@ class LGAStore:
         updated = 0
         for i in range(0, len(url_list), 100):
             chunk = url_list[i:i+100]
-            self.sb.table(table).update({
-                'status': 'removed',
-                'removed_at': now,
-                'last_seen': now,
-            }).in_('url', chunk).execute()
+            retry_on_disconnect(
+                lambda c=chunk: self.sb.table(table).update({
+                    'status': 'removed',
+                    'removed_at': now,
+                    'last_seen': now,
+                }).in_('url', c).execute(),
+                f"mark_removed({table}, lga={self.lga_id}, chunk of {len(chunk)})"
+            )
             updated += len(chunk)
         log.info(f"  Marked removed: {updated}/{len(url_list)}")
         return updated
@@ -614,7 +658,10 @@ class LGAStore:
         deleted = 0
         for i in range(0, len(url_list), 100):
             chunk = url_list[i:i+100]
-            self.sb.table(table).delete().eq('lga_id', self.lga_id).in_('url', chunk).execute()
+            retry_on_disconnect(
+                lambda c=chunk: self.sb.table(table).delete().eq('lga_id', self.lga_id).in_('url', c).execute(),
+                f"delete_urls({table}, lga={self.lga_id}, chunk of {len(chunk)})"
+            )
             deleted += len(chunk)
         log.info(f"  Deleted: {deleted}/{len(url_list)}")
         return deleted
@@ -664,11 +711,14 @@ class LGAStore:
         reactivated = 0
         for i in range(0, len(url_list), 100):
             chunk = url_list[i:i+100]
-            self.sb.table(table).update({
-                'status': 'active',
-                'removed_at': None,
-                'last_seen': now,
-            }).eq('lga_id', self.lga_id).in_('url', chunk).execute()
+            retry_on_disconnect(
+                lambda c=chunk: self.sb.table(table).update({
+                    'status': 'active',
+                    'removed_at': None,
+                    'last_seen': now,
+                }).eq('lga_id', self.lga_id).in_('url', c).execute(),
+                f"reactivate({table}, lga={self.lga_id}, chunk of {len(chunk)})"
+            )
             reactivated += len(chunk)
         return reactivated
 
@@ -1050,7 +1100,10 @@ def _fetch_sold_dates(sb: Client, lga_id: int, sold_urls_raw: set, normalised_ur
     result = {}
     for i in range(0, len(raw_needed), 100):
         chunk = raw_needed[i:i+100]
-        resp = sb.table('sold').select('url,sold_date').eq('lga_id', lga_id).in_('url', chunk).execute()
+        resp = retry_on_disconnect(
+            lambda c=chunk: sb.table('sold').select('url,sold_date').eq('lga_id', lga_id).in_('url', c).execute(),
+            f"_fetch_sold_dates(lga={lga_id}, chunk of {len(chunk)})"
+        )
         for r in resp.data:
             if r.get('sold_date'):
                 result[r['url'].replace('realestate.com.au/sold/', 'realestate.com.au/')] = r['sold_date']
@@ -1090,7 +1143,10 @@ def run_reconcile(sb: Client, lga: dict):
             url_list = list(removed_not_sold)
             for i in range(0, len(url_list), 50):
                 chunk = url_list[i:i+50]
-                sb.table('listings').update({'status': 'removed_not_sold'}).in_('url', chunk).execute()
+                retry_on_disconnect(
+                    lambda c=chunk: sb.table('listings').update({'status': 'removed_not_sold'}).in_('url', c).execute(),
+                    f"removed_not_sold(lga={lga_id}, chunk of {len(chunk)})"
+                )
 
         # Pre-existing bug, found 23 Sep 2026 while building fast/off-market
         # sales reporting: removed_sold was computed and logged ("Confirmed
@@ -1103,12 +1159,18 @@ def run_reconcile(sb: Client, lga: dict):
             url_list = list(removed_sold)
             for i in range(0, len(url_list), 50):
                 chunk = url_list[i:i+50]
-                sb.table('listings').update({'status': 'sold'}).in_('url', chunk).execute()
+                retry_on_disconnect(
+                    lambda c=chunk: sb.table('listings').update({'status': 'sold'}).in_('url', c).execute(),
+                    f"removed_sold status(lga={lga_id}, chunk of {len(chunk)})"
+                )
             # sold_date set per-URL (can't batch a per-row differing value
             # through a single .update()) -- fine, removed_sold is a small
             # nightly set, not thousands of rows.
             for url, sd in sold_dates.items():
-                sb.table('listings').update({'sold_date': sd}).eq('lga_id', lga_id).eq('url', url).execute()
+                retry_on_disconnect(
+                    lambda u=url, s=sd: sb.table('listings').update({'sold_date': s}).eq('lga_id', lga_id).eq('url', u).execute(),
+                    f"removed_sold sold_date(lga={lga_id}, url={url})"
+                )
 
         # Re-check EXISTING removed_not_sold rows against sold too — a listing
         # can sit as removed_not_sold for weeks (agent pulled it while a sale
@@ -1125,9 +1187,15 @@ def run_reconcile(sb: Client, lga: dict):
             url_list = list(wns_now_sold)
             for i in range(0, len(url_list), 50):
                 chunk = url_list[i:i+50]
-                sb.table('listings').update({'status': 'sold'}).eq('lga_id', lga_id).in_('url', chunk).execute()
+                retry_on_disconnect(
+                    lambda c=chunk: sb.table('listings').update({'status': 'sold'}).eq('lga_id', lga_id).in_('url', c).execute(),
+                    f"wns_now_sold status(lga={lga_id}, chunk of {len(chunk)})"
+                )
             for url, sd in sold_dates.items():
-                sb.table('listings').update({'sold_date': sd}).eq('lga_id', lga_id).eq('url', url).execute()
+                retry_on_disconnect(
+                    lambda u=url, s=sd: sb.table('listings').update({'sold_date': s}).eq('lga_id', lga_id).eq('url', u).execute(),
+                    f"wns_now_sold sold_date(lga={lga_id}, url={url})"
+                )
             log.info(f"  → {len(wns_now_sold)} previously-WNS listing(s) now confirmed sold — removed from hotlist")
 
         # Off-market sales: sold, but with NO listings row at all — not even a
@@ -1159,11 +1227,14 @@ def run_reconcile(sb: Client, lga: dict):
             sold_detail_rows = []
             for i in range(0, len(raw_urls_needed), 100):
                 chunk = raw_urls_needed[i:i+100]
-                resp = (sb.table('sold')
-                        .select('address,agent,agency,url,first_seen,sold_date')
-                        .eq('lga_id', lga_id)
-                        .in_('url', chunk)
-                        .execute())
+                resp = retry_on_disconnect(
+                    lambda c=chunk: (sb.table('sold')
+                            .select('address,agent,agency,url,first_seen,sold_date')
+                            .eq('lga_id', lga_id)
+                            .in_('url', c)
+                            .execute()),
+                    f"off_market sold detail(lga={lga_id}, chunk of {len(chunk)})"
+                )
                 sold_detail_rows.extend(resp.data)
 
             now_iso = datetime.now(timezone.utc).isoformat()
@@ -1182,7 +1253,10 @@ def run_reconcile(sb: Client, lga: dict):
 
             for i in range(0, len(backfill_records), 500):
                 chunk = backfill_records[i:i+500]
-                sb.table('listings').upsert(chunk, on_conflict='url,lga_id').execute()
+                retry_on_disconnect(
+                    lambda c=chunk: sb.table('listings').upsert(c, on_conflict='url,lga_id').execute(),
+                    f"off_market backfill(lga={lga_id}, chunk of {len(chunk)})"
+                )
             backfilled = len(backfill_records)
             log.info(f"  → Off-market sales backfilled into listings: {backfilled} (never appeared as a listing until now)")
 
@@ -1265,6 +1339,19 @@ def main():
     max_pages = args.max_pages or MAX_PAGES
 
     def process_lga(lga):
+        # Root cause fix, 24 Sep 2026 (diagnosed by a separate review pass,
+        # confirmed against this exact code before implementing): every
+        # --parallel thread used to share the ONE `sb` client created above
+        # in main() -- a single sync httpx client over one HTTP/2 connection
+        # is not safe for concurrent use across threads. When that shared
+        # connection got torn down (a GOAWAY, or the server just dropping
+        # it), every thread using it failed in the same instant --
+        # explaining why failures kept showing up in pairs, at the exact
+        # same timestamp, across unrelated regions. Each thread now gets
+        # its own client, so one connection dying can only ever take down
+        # the one LGA using it.
+        sb = get_supabase()
+
         if args.reconcile_only:
             run_reconcile(sb, lga)
             return
