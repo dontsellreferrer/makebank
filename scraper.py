@@ -400,9 +400,16 @@ class URLCollector:
 # ── Phase 2: Detail scrape via Playwright ─────────────────────────────────────
 ROTATE_EVERY = 1  # New browser context every page — full cookie rotation
 
-def scrape_details_playwright(urls: list[str], pool: CookiePool) -> list[dict]:
+def scrape_details_playwright(urls: list[str], pool: CookiePool, lga_id: Optional[int] = None) -> list[dict]:
     """Visit each URL with Playwright, extract address/agent/agency.
-    Rotates cookie and browser context every ROTATE_EVERY pages."""
+    Rotates cookie and browser context every ROTATE_EVERY pages.
+
+    lga_id is passed through only for Fix B1 logging (phase2_report_gaps_
+    diagnosis, 27 Sep 2026) -- when a fetched page fails to parse, we log
+    the HTTP status and a body snippet so a block/challenge page can be
+    told apart from a parser broken by a page-structure change. Both were
+    already available (the Response object from page.goto(), and `html`
+    itself) but neither was being captured before this fix."""
     results = []
 
     with sync_playwright() as p:
@@ -438,7 +445,8 @@ def scrape_details_playwright(urls: list[str], pool: CookiePool) -> list[dict]:
             context, page = new_context()
             log.info(f"  [{i}/{len(urls)}] {url}")
             try:
-                page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                response = page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                status = response.status if response else None
                 try:
                     page.wait_for_selector(
                         'a[href*="/agent/"], a[href*="/agency/"], a[href*="/home-builders/"], [class*="NonLink"]',
@@ -450,6 +458,9 @@ def scrape_details_playwright(urls: list[str], pool: CookiePool) -> list[dict]:
                 if detail:
                     results.append(detail)
                     log.info(f"    → {detail['agent']} / {detail['agency']}")
+                else:
+                    snippet = re.sub(r'\s+', ' ', html)[:200]
+                    log.warning(f"    Parse failed | LGA {lga_id} | status={status} | {url} | body: {snippet!r}")
             except Exception as e:
                 log.warning(f"  Error on {url}: {e}")
             finally:
@@ -1023,6 +1034,31 @@ def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]]
         query = query.limit(batch_limit)
     pending = query.execute().data
 
+    # Fix A (phase2_report_gaps_diagnosis, 27 Sep 2026): a region/type with
+    # nothing queued by phase 1 used to be silently skipped below -- no
+    # `runs` row at all -- and the ops report can't tell that apart from
+    # "phase 2 never ran", so it flagged it as a false failure. Write an
+    # explicit 'skipped' row for every active+dated LGA x type this
+    # invocation was scoped to cover but that has nothing pending.
+    # ops_health.lga_problems treats 'skipped' as clean, same as 'ok'.
+    #
+    # Skipped only when batch_limit is unset: batch_limit exists to stagger
+    # a large queue across several scheduled runs, so a combo cut off by
+    # the limit still has real work queued -- marking it 'skipped' would
+    # be a false all-clear, the same failure mode this fix exists to kill.
+    if batch_limit is None:
+        types_expected = [run_type] if run_type else ['listings', 'sold']
+        lga_query = sb.table('lgas').select('id').eq('active', True).eq('dated', True)
+        if lga_ids:
+            lga_query = lga_query.in_('id', lga_ids)
+        expected_lga_ids = [row['id'] for row in lga_query.execute().data]
+
+        have_pending = {(row['lga_id'], row['run_type']) for row in pending}
+        for eid in expected_lga_ids:
+            for etype in types_expected:
+                if (eid, etype) not in have_pending:
+                    LGAStore(sb, eid).log_run(f'{etype}_phase2', 0, 0, 0, 'skipped', 'nothing pending', 0.0)
+
     if not pending:
         log.info("Phase 2: nothing pending")
         return
@@ -1049,7 +1085,7 @@ def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]]
         inserted = 0
 
         try:
-            details = scrape_details_playwright(urls, pool)
+            details = scrape_details_playwright(urls, pool, lga_id=lga_id)
             inserted = store.insert_new(table, details)
             log.info(f"Inserted {inserted} rows")
 
@@ -1057,6 +1093,12 @@ def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]]
             # detail scrape — if parse_detail() silently dropped one (e.g.
             # the address selector didn't match), its row stays queued so
             # it's retried on the next Phase 2 run instead of being lost.
+            # NOTE (phase2_report_gaps_diagnosis, 27 Sep 2026): there's no
+            # retry cap on these -- a URL that can never parse (a permanent
+            # page-structure break, not a transient block) will stay queued
+            # and get retried every Phase 2 run indefinitely. Fix B1's
+            # per-URL logging is what lets that be told apart from a
+            # transient block; adding an actual cap was out of scope here.
             scraped_urls = {d['url'] for d in details}
             done_ids = [r['id'] for r in rows if r['url'] in scraped_urls]
             leftover = len(rows) - len(done_ids)
@@ -1064,6 +1106,14 @@ def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]]
                 sb.table('pending_scrape_urls').delete().in_('id', done_ids[i:i+200]).execute()
             if leftover:
                 log.warning(f"{leftover} URL(s) didn't parse — left queued for retry")
+
+            # Fix B2: a run that completed without error but parsed 0 of N
+            # URLs looks identical to a healthy run in `runs` -- flag it so
+            # the ops report surfaces it under "need a look" instead of
+            # silently recording it as clean.
+            if inserted == 0 and len(rows) > 0:
+                status = 'warning'
+                error_msg = f'0/{len(rows)} URLs parsed'
 
         except Exception as e:
             status = 'error'

@@ -41,12 +41,21 @@ def get_latest_runs(supabase_url: str, supabase_key: str, cutoff_iso: str) -> di
 
 def lga_problems(lga_id: int, latest_runs: dict) -> list[str]:
     """Empty list = clean night. Otherwise, one string per expected run
-    type that's either missing entirely or logged with status != 'ok'."""
+    type that's either missing entirely or logged with a status that
+    isn't clean.
+
+    'skipped' counts as clean alongside 'ok' (added 27 Sep 2026, Fix A of
+    phase2_report_gaps_diagnosis): Phase 2 now writes an explicit
+    'skipped' row for a region/type Phase 1 queued nothing for, instead
+    of leaving no row at all -- so "nothing to do" no longer reads as
+    "no run found in the last 26h". Any other non-'ok' status (including
+    the new 'warning' from Fix B2 -- a run that completed but parsed 0
+    of N URLs) still surfaces here via its error_msg."""
     problems = []
     for run_type in EXPECTED_RUN_TYPES:
         run = latest_runs.get((lga_id, run_type))
         if not run:
             problems.append(f"{run_type}: no run found in the last 26h")
-        elif run["status"] != "ok":
+        elif run["status"] not in ("ok", "skipped"):
             problems.append(f"{run_type}: {run.get('error_msg') or 'failed'}")
     return problems
