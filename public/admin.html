@@ -161,6 +161,38 @@ form{padding:40px 0 60px;}
   <div class="status-msg" id="import-status-msg"></div>
 </form>
 
+<form class="wrap" id="export-form" style="padding-bottom:60px;border-top:1px solid var(--hairline);padding-top:40px;">
+  <div class="f-section">
+    <div class="f-section-title">Export to CSV</div>
+    <div class="f-hint" style="margin-bottom:16px;">Every matching row for one region, straight from Supabase — no SQL Editor row cap. Hydration listings aren't saved to the database (they're in the emailed CSV); sold data is.</div>
+    <div class="f-row">
+      <div class="f-field">
+        <label for="export-lga">LGA number</label>
+        <input type="number" id="export-lga" placeholder="e.g. 81">
+      </div>
+      <div class="f-field">
+        <label for="export-table">Table</label>
+        <select id="export-table">
+          <option value="listings">Listings</option>
+          <option value="sold">Sold</option>
+        </select>
+      </div>
+    </div>
+    <div class="f-row">
+      <div class="f-field">
+        <label for="export-status">Status</label>
+        <select id="export-status"></select>
+      </div>
+      <div class="f-field">
+        <label>Matching rows</label>
+        <div id="export-preview" style="padding:13px 0;font-family:'IBM Plex Mono',monospace;font-size:14px;color:var(--cream);">—</div>
+      </div>
+    </div>
+  </div>
+  <button type="submit" class="btn btn-primary" id="export-submit-btn">Download CSV</button>
+  <div class="status-msg" id="export-status-msg"></div>
+</form>
+
 <div class="footer">MakeBank internal &middot; not linked from the public site</div>
 
 <script>
@@ -289,6 +321,115 @@ function showStatus(msg, ok) {
   el.textContent = msg;
   el.className = `status-msg show ${ok ? 'ok' : 'err'}`;
 }
+
+// ---------------------------------------------------------------------------
+// Export to CSV (folded in from export.html). Pages through the full result
+// set in 1000-row batches via the Range header, so no row cap applies.
+// ---------------------------------------------------------------------------
+const EXPORT_PAGE_SIZE = 1000;
+
+async function sbPage(table, params, rangeStart, rangeEnd) {
+  const r = await fetch(`${CONFIG.supabaseUrl}/rest/v1/${table}?${params}`, {
+    headers: {
+      'apikey': CONFIG.supabaseKey, 'Authorization': `Bearer ${CONFIG.supabaseKey}`,
+      'Prefer': 'count=exact', 'Range': `${rangeStart}-${rangeEnd}`,
+    },
+  });
+  if (!r.ok) throw new Error(`${table} fetch failed: ${r.status}`);
+  const range = r.headers.get('content-range'); // e.g. "0-999/2431"
+  const total = range ? parseInt(range.split('/')[1]) : null;
+  return { data: await r.json(), total };
+}
+
+function exportParams() {
+  const table = document.getElementById('export-table').value;
+  const lga = document.getElementById('export-lga').value;
+  const status = document.getElementById('export-status').value;
+  let params = `lga_id=eq.${lga}&select=*&order=id.asc`;
+  if (status) params += `&status=eq.${status}`;
+  return { table, lga, status, params };
+}
+
+function setExportStatusOptions() {
+  const table = document.getElementById('export-table').value;
+  let opts = '<option value="">All</option><option value="active" selected>Active</option><option value="removed">Removed</option>';
+  if (table === 'listings') opts += '<option value="removed_not_sold">Removed – Not Sold</option>';
+  document.getElementById('export-status').innerHTML = opts;
+}
+
+let exportPreviewTimer;
+function scheduleExportPreview() {
+  clearTimeout(exportPreviewTimer);
+  const el = document.getElementById('export-preview');
+  if (!document.getElementById('export-lga').value) { el.textContent = '—'; return; }
+  el.textContent = 'counting…';
+  exportPreviewTimer = setTimeout(async () => {
+    try {
+      const { table, params } = exportParams();
+      const { total } = await sbPage(table, params, 0, 0);
+      el.textContent = total ?? '—';
+    } catch { el.textContent = '—'; }
+  }, 300);
+}
+
+function csvEscape(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function showExportStatus(msg, ok) {
+  const el = document.getElementById('export-status-msg');
+  el.textContent = msg;
+  el.className = `status-msg show ${ok ? 'ok' : 'err'}`;
+}
+
+document.getElementById('export-table').addEventListener('change', () => { setExportStatusOptions(); scheduleExportPreview(); });
+document.getElementById('export-status').addEventListener('change', scheduleExportPreview);
+document.getElementById('export-lga').addEventListener('input', scheduleExportPreview);
+setExportStatusOptions();
+
+document.getElementById('export-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('export-submit-btn');
+  const { table, lga, status, params } = exportParams();
+  if (!lga) { showExportStatus('Enter an LGA number first.', false); return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Fetching…';
+  document.getElementById('export-status-msg').className = 'status-msg';
+
+  try {
+    let all = [], start = 0, total = null;
+    while (true) {
+      const { data, total: t } = await sbPage(table, params, start, start + EXPORT_PAGE_SIZE - 1);
+      total = t;
+      all = all.concat(data);
+      if (data.length < EXPORT_PAGE_SIZE || (total !== null && all.length >= total)) break;
+      start += EXPORT_PAGE_SIZE;
+      btn.textContent = `Fetching… (${all.length}${total ? '/' + total : ''})`;
+    }
+    if (!all.length) { showExportStatus('No matching rows — nothing to download.', false); return; }
+
+    const headers = Object.keys(all[0]);
+    const csv = [headers, ...all.map(r => headers.map(h => r[h]))]
+      .map(row => row.map(csvEscape).join(',')).join('\r\n');
+    const today = new Date().toISOString().slice(0, 10);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `makebank_${table}_lga${lga}_${status || 'all'}_${today}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showExportStatus(`Downloaded ${all.length} rows.`, true);
+  } catch (err) {
+    console.error(err);
+    showExportStatus(err.message || 'Something went wrong.', false);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Download CSV';
+  }
+});
 
 document.getElementById('admin-form').addEventListener('submit', async (e) => {
   e.preventDefault();
