@@ -393,6 +393,11 @@ class URLCollector:
         finally:
             self._stop_browser()
 
+        # Same listing can appear on two pages when results shift mid-run —
+        # drop repeats (order kept) so Phase 1's pending_scrape_urls upsert
+        # and the detail scrape never see a URL twice.
+        new_urls = list(dict.fromkeys(new_urls))
+
         # Store all live URLs on self so run_scrape can compute removals
         self._last_all_live_urls = set(all_live_urls)
         return new_urls
@@ -616,6 +621,14 @@ class LGAStore:
     def insert_new(self, table: str, rows: list[dict]) -> int:
         if not rows:
             return 0
+        # De-duplicate by URL before upserting (fix, 1 Oct 2026). A long URL
+        # collection (e.g. Ballarat, 73 pages over ~6 min) can see the same
+        # listing on two pages as new listings shift results down mid-run.
+        # Postgres rejects an upsert chunk containing the same (url, lga_id)
+        # twice ("ON CONFLICT DO UPDATE command cannot affect row a second
+        # time"), which aborted Ballarat's hydration after the first 500.
+        # Last occurrence wins.
+        rows = list({r['url']: r for r in rows}.values())
         now = datetime.now(timezone.utc).isoformat()
         records = [{
             'lga_id': self.lga_id,
