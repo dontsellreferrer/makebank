@@ -404,8 +404,11 @@ document.getElementById('export-form').addEventListener('submit', async (e) => {
       const { data, total: t } = await sbPage(table, params, start, start + EXPORT_PAGE_SIZE - 1);
       total = t;
       all = all.concat(data);
-      if (data.length < EXPORT_PAGE_SIZE || (total !== null && all.length >= total)) break;
-      start += EXPORT_PAGE_SIZE;
+      // Advance by what the server actually returned, not by the page size we
+      // asked for -- Supabase's own max-rows setting can cap each response
+      // below EXPORT_PAGE_SIZE (e.g. 500), which previously ended the loop early.
+      if (!data.length || (total !== null && all.length >= total)) break;
+      start += data.length;
       btn.textContent = `Fetching… (${all.length}${total ? '/' + total : ''})`;
     }
     if (!all.length) { showExportStatus('No matching rows — nothing to download.', false); return; }
