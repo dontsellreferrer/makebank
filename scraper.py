@@ -417,8 +417,26 @@ def scrape_details_playwright(urls: list[str], pool: CookiePool, lga_id: Optiona
     itself) but neither was being captured before this fix."""
     results = []
 
+    # Browser crash recovery (fix, 2 Oct 2026). Ballarat's re-hydration
+    # (1,830 URLs) died ~2h in with "Browser.new_context: Target page,
+    # context or browser has been closed" -- Chromium itself went away, and
+    # because new_context() sat outside the per-URL try, that one error
+    # killed the whole loop and every already-scraped result with it
+    # (nothing saved, no CSV email). Now: the browser is recycled every
+    # BROWSER_RECYCLE_EVERY listings to stop long runs bloating, and if it
+    # dies anyway it's relaunched and the same URL retried once.
+    BROWSER_RECYCLE_EVERY = 200
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
+
+        def relaunch():
+            nonlocal browser
+            try:
+                browser.close()
+            except Exception:
+                pass
+            browser = p.chromium.launch(headless=True)
 
         def parse_cookie_str(cookie_str):
             cookies = []
@@ -447,7 +465,19 @@ def scrape_details_playwright(urls: list[str], pool: CookiePool, lga_id: Optiona
             return ctx, ctx.new_page()
 
         for i, url in enumerate(urls, 1):
-            context, page = new_context()
+            if i > 1 and (i - 1) % BROWSER_RECYCLE_EVERY == 0:
+                log.info(f"  Recycling browser after {i - 1} listings")
+                relaunch()
+            try:
+                context, page = new_context()
+            except Exception as e:
+                log.warning(f"  Browser unavailable ({e}) — relaunching and retrying {url}")
+                try:
+                    relaunch()
+                    context, page = new_context()
+                except Exception as e2:
+                    log.error(f"  Relaunch failed, skipping {url}: {e2}")
+                    continue
             log.info(f"  [{i}/{len(urls)}] {url}")
             try:
                 response = page.goto(url, wait_until='domcontentloaded', timeout=30000)
@@ -469,10 +499,16 @@ def scrape_details_playwright(urls: list[str], pool: CookiePool, lga_id: Optiona
             except Exception as e:
                 log.warning(f"  Error on {url}: {e}")
             finally:
-                context.close()
+                try:
+                    context.close()
+                except Exception:
+                    pass
             time.sleep(random.uniform(3, 8))
 
-        browser.close()
+        try:
+            browser.close()
+        except Exception:
+            pass
 
     return results
 
