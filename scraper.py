@@ -711,7 +711,7 @@ class LGAStore:
                     'status': 'removed',
                     'removed_at': now,
                     'last_seen': now,
-                }).in_('url', c).execute(),
+                }).eq('lga_id', self.lga_id).in_('url', c).execute(),
                 f"mark_removed({table}, lga={self.lga_id}, chunk of {len(chunk)})"
             )
             updated += len(chunk)
@@ -736,13 +736,38 @@ class LGAStore:
         log.info(f"  Deleted: {deleted}/{len(url_list)}")
         return deleted
 
+    def get_urls_by_status(self, table: str, statuses: list[str]) -> set[str]:
+        """All URLs in this LGA with one of the given statuses, paged in
+        1000s (fix, 2 Oct 2026) -- the unpaged versions of these queries
+        silently capped at Supabase's per-request row limit, so a region
+        with more than that many removed listings lost the excess."""
+        urls, offset, page_size = set(), 0, 1000
+        while True:
+            resp = retry_on_disconnect(
+                lambda: (self.sb.table(table).select('url')
+                         .eq('lga_id', self.lga_id).in_('status', statuses)
+                         .order('id').range(offset, offset + page_size - 1).execute()),
+                f"get_urls_by_status({table}, lga={self.lga_id}, {statuses})"
+            )
+            batch = [r['url'] for r in resp.data]
+            urls.update(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
+        return urls
+
     def get_removed_urls(self, table: str = 'listings') -> set[str]:
-        resp = (self.sb.table(table)
-                .select('url')
-                .eq('lga_id', self.lga_id)
-                .eq('status', 'removed')
-                .execute())
-        return {r['url'] for r in resp.data}
+        return self.get_urls_by_status(table, ['removed'])
+
+    def get_settled_urls(self, table: str = 'listings') -> set[str]:
+        """Listings already off the market for a known reason -- removed,
+        removed_not_sold or sold. None of these may be counted as a fresh
+        removal again (fix, 2 Oct 2026: 'sold' was missing here, so every
+        sold listing was re-marked 'removed' with removed_at = tonight on
+        every nightly run, and any whose sale had aged out of the 30-day
+        `sold` table then landed on the Removed-Not-Sold hotlist as a
+        brand-new withdrawal)."""
+        return self.get_urls_by_status(table, ['removed', 'removed_not_sold', 'sold'])
 
     def get_removed_not_sold_urls(self, table: str = 'listings') -> set[str]:
         """Listings already classified removed_not_sold — reconcile needs to
@@ -753,22 +778,12 @@ class LGAStore:
         up in `sold`, at which point it needs to come OUT of the hotlist,
         not stay there forever (found 18 Sep 2026 — this case was never
         re-checked once first classified)."""
-        resp = (self.sb.table(table)
-                .select('url')
-                .eq('lga_id', self.lga_id)
-                .eq('status', 'removed_not_sold')
-                .execute())
-        return {r['url'] for r in resp.data}
+        return self.get_urls_by_status(table, ['removed_not_sold'])
 
     def get_inactive_urls(self, table: str = 'listings') -> set[str]:
         """URLs currently marked removed OR removed_not_sold — candidates for
         reactivation if they show up live again."""
-        resp = (self.sb.table(table)
-                .select('url')
-                .eq('lga_id', self.lga_id)
-                .in_('status', ['removed', 'removed_not_sold'])
-                .execute())
-        return {r['url'] for r in resp.data}
+        return self.get_urls_by_status(table, ['removed', 'removed_not_sold'])
 
     def reactivate(self, table: str, urls: set[str]) -> int:
         """A previously-removed listing is live again. Flip status back to
@@ -913,6 +928,7 @@ def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages
         # silently wiping the listing's real first_seen on restoration.
         known_urls = store.get_all_urls(table)
         inactive_urls = store.get_inactive_urls(table) if table == 'listings' else set()
+        settled_urls = store.get_settled_urls(table) if table == 'listings' else set()
         log.info(f"Known URLs in Supabase: {len(known_urls)} ({len(inactive_urls)} currently inactive)")
 
         # Phase 1: Collect URLs — filter known ones per page
@@ -928,7 +944,7 @@ def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages
         # gone for weeks would get re-marked 'removed' (and removed_at
         # refreshed to today) on every single run, permanently corrupting the
         # daily/weekly "removed today" figures.
-        removed_urls = (known_urls - collector._last_all_live_urls) - inactive_urls
+        removed_urls = (known_urls - collector._last_all_live_urls) - settled_urls
         reactivated_urls = collector._last_all_live_urls & inactive_urls  # known + inactive + live again = restored
 
         log.info(f"New: {len(new_urls)} | Removed: {len(removed_urls)} | Reactivated: {len(reactivated_urls)}")
@@ -1022,12 +1038,13 @@ def run_scrape_phase1(sb: Client, pool: CookiePool, lga: dict, run_type: str, ma
     try:
         known_urls = store.get_all_urls(table)
         inactive_urls = store.get_inactive_urls(table) if table == 'listings' else set()
+        settled_urls = store.get_settled_urls(table) if table == 'listings' else set()
         log.info(f"Known URLs in Supabase: {len(known_urls)} ({len(inactive_urls)} currently inactive)")
 
         cutoff = 30 if run_type == 'sold' else 0
         new_urls = set(collector.collect_urls(base_url, sold_cutoff_days=cutoff, known_urls=known_urls))
 
-        removed_urls = (known_urls - collector._last_all_live_urls) - inactive_urls
+        removed_urls = (known_urls - collector._last_all_live_urls) - settled_urls
         reactivated_urls = collector._last_all_live_urls & inactive_urls
 
         log.info(f"New: {len(new_urls)} | Removed: {len(removed_urls)} | Reactivated: {len(reactivated_urls)}")
@@ -1271,7 +1288,7 @@ def run_reconcile(sb: Client, lga: dict):
             for i in range(0, len(url_list), 50):
                 chunk = url_list[i:i+50]
                 retry_on_disconnect(
-                    lambda c=chunk: sb.table('listings').update({'status': 'removed_not_sold'}).in_('url', c).execute(),
+                    lambda c=chunk: sb.table('listings').update({'status': 'removed_not_sold'}).eq('lga_id', lga_id).in_('url', c).execute(),
                     f"removed_not_sold(lga={lga_id}, chunk of {len(chunk)})"
                 )
 
@@ -1287,7 +1304,7 @@ def run_reconcile(sb: Client, lga: dict):
             for i in range(0, len(url_list), 50):
                 chunk = url_list[i:i+50]
                 retry_on_disconnect(
-                    lambda c=chunk: sb.table('listings').update({'status': 'sold'}).in_('url', c).execute(),
+                    lambda c=chunk: sb.table('listings').update({'status': 'sold'}).eq('lga_id', lga_id).in_('url', c).execute(),
                     f"removed_sold status(lga={lga_id}, chunk of {len(chunk)})"
                 )
             # sold_date set per-URL (can't batch a per-row differing value
