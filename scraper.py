@@ -405,7 +405,8 @@ class URLCollector:
 # ── Phase 2: Detail scrape via Playwright ─────────────────────────────────────
 ROTATE_EVERY = 1  # New browser context every page — full cookie rotation
 
-def scrape_details_playwright(urls: list[str], pool: CookiePool, lga_id: Optional[int] = None) -> list[dict]:
+def scrape_details_playwright(urls: list[str], pool: CookiePool, lga_id: Optional[int] = None,
+                              stats: Optional[dict] = None) -> list[dict]:
     """Visit each URL with Playwright, extract address/agent/agency.
     Rotates cookie and browser context every ROTATE_EVERY pages.
 
@@ -414,8 +415,15 @@ def scrape_details_playwright(urls: list[str], pool: CookiePool, lga_id: Optiona
     the HTTP status and a body snippet so a block/challenge page can be
     told apart from a parser broken by a page-structure change. Both were
     already available (the Response object from page.goto(), and `html`
-    itself) but neither was being captured before this fix."""
+    itself) but neither was being captured before this fix.
+
+    stats (added 2 Oct 2026): optional dict the caller passes in; '429s' is
+    incremented for every detail page REA answers with HTTP 429, so the run
+    can record it in runs.burns. A local dict rather than a pool counter
+    because Phase 2 shares one pool across parallel groups."""
     results = []
+    if stats is not None:
+        stats.setdefault('429s', 0)
 
     # Browser crash recovery (fix, 2 Oct 2026). Ballarat's re-hydration
     # (1,830 URLs) died ~2h in with "Browser.new_context: Target page,
@@ -482,6 +490,8 @@ def scrape_details_playwright(urls: list[str], pool: CookiePool, lga_id: Optiona
             try:
                 response = page.goto(url, wait_until='domcontentloaded', timeout=30000)
                 status = response.status if response else None
+                if status == 429 and stats is not None:
+                    stats['429s'] += 1
                 try:
                     page.wait_for_selector(
                         'a[href*="/agent/"], a[href*="/agency/"], a[href*="/home-builders/"], [class*="NonLink"]',
@@ -785,8 +795,8 @@ class LGAStore:
     def get_sold_urls(self) -> set[str]:
         return self.get_all_urls('sold')
 
-    def log_run(self, run_type, new_count, removed_count, updated_count, status, error_msg, duration_secs):
-        self.sb.table('runs').insert({
+    def log_run(self, run_type, new_count, removed_count, updated_count, status, error_msg, duration_secs, burns=0):
+        row = {
             'lga_id': self.lga_id,
             'run_type': run_type,
             'new_count': new_count,
@@ -795,7 +805,18 @@ class LGAStore:
             'status': status,
             'error_msg': error_msg,
             'duration_secs': round(duration_secs, 1),
-        }).execute()
+            'burns': burns,
+        }
+        try:
+            self.sb.table('runs').insert(row).execute()
+        except Exception as e:
+            # runs.burns arrives with sql/14_runs_burns.sql -- if that hasn't
+            # been run yet, still log the run rather than lose it.
+            if 'burns' not in str(e):
+                raise
+            log.warning("runs.burns column missing (run sql/14_runs_burns.sql) — logging run without it")
+            row.pop('burns')
+            self.sb.table('runs').insert(row).execute()
 
 # ── Import CSV ────────────────────────────────────────────────────────────────
 def import_csv(path: str, table: str, lga_id: int, sb: Client):
@@ -868,6 +889,8 @@ def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages
 
     # Reload cookie pool from Supabase before each scrape type — ensures fresh cookies
     pool.reload()
+    burns_before = pool.burned_count
+    detail_stats = {}
 
     log.info(f"{'='*60}")
     log.info(f"LGA: {lga_name} ({lga_id}) | Type: {run_type}")
@@ -935,7 +958,7 @@ def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages
         # Phase 2: Playwright detail scrape for new URLs only
         if new_urls:
             log.info(f"Phase 2: Playwright scraping {len(new_urls)} new listings...")
-            new_rows = scrape_details_playwright(list(new_urls), pool)
+            new_rows = scrape_details_playwright(list(new_urls), pool, lga_id=lga_id, stats=detail_stats)
             new_count = store.insert_new(table, new_rows)
             log.info(f"Inserted {new_count} new rows")
         else:
@@ -965,7 +988,8 @@ def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages
         log.error(f"Run failed: {e}", exc_info=True)
 
     duration = time.time() - t_start
-    store.log_run(run_type, new_count, removed_count, 0, status, error_msg, duration)
+    burns = (pool.burned_count - burns_before) + detail_stats.get('429s', 0)
+    store.log_run(run_type, new_count, removed_count, 0, status, error_msg, duration, burns=burns)
     log.info(f"Complete in {duration:.1f}s — new:{new_count} removed:{removed_count}")
     return status
 
@@ -982,6 +1006,7 @@ def run_scrape_phase1(sb: Client, pool: CookiePool, lga: dict, run_type: str, ma
     base_url = lga['search_url_listings'] if run_type == 'listings' else lga['search_url_sold']
 
     pool.reload()
+    burns_before = pool.burned_count
     log.info(f"{'='*60}")
     log.info(f"PHASE 1: {lga_name} ({lga_id}) | Type: {run_type}")
     log.info(f"{'='*60}")
@@ -1051,7 +1076,8 @@ def run_scrape_phase1(sb: Client, pool: CookiePool, lga: dict, run_type: str, ma
         log.error(f"Phase 1 failed: {e}", exc_info=True)
 
     duration = time.time() - t_start
-    store.log_run(f'{run_type}_phase1', queued_count, removed_count, 0, status, error_msg, duration)
+    store.log_run(f'{run_type}_phase1', queued_count, removed_count, 0, status, error_msg, duration,
+                  burns=pool.burned_count - burns_before)
     log.info(f"Phase 1 complete in {duration:.1f}s — queued:{queued_count} removed:{removed_count}")
     return status
 
@@ -1132,9 +1158,10 @@ def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]]
         status = 'ok'
         error_msg = ''
         inserted = 0
+        detail_stats = {}
 
         try:
-            details = scrape_details_playwright(urls, pool, lga_id=lga_id)
+            details = scrape_details_playwright(urls, pool, lga_id=lga_id, stats=detail_stats)
             inserted = store.insert_new(table, details)
             log.info(f"Inserted {inserted} rows")
 
@@ -1170,7 +1197,8 @@ def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]]
             log.error(f"Phase 2 failed for LGA {lga_id}/{r_type}: {e}", exc_info=True)
 
         duration = time.time() - t_start
-        store.log_run(f'{r_type}_phase2', inserted, 0, 0, status, error_msg, duration)
+        store.log_run(f'{r_type}_phase2', inserted, 0, 0, status, error_msg, duration,
+                      burns=detail_stats.get('429s', 0))
         log.info(f"Phase 2 complete for LGA {lga_id}/{r_type} in {duration:.1f}s")
 
     if parallel > 1 and len(groups) > 1:

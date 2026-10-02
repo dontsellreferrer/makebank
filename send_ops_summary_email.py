@@ -70,11 +70,90 @@ def build_region_results(lgas: list[dict], latest_runs: dict) -> list[dict]:
     return results
 
 
+def get_hydrations(cutoff_iso: str) -> list[dict]:
+    """Every hydrate_listings run in the window (added 2 Oct 2026). A failed
+    hydration never sets dated=true, so the per-region section above can't
+    see it -- this is the only place it shows up."""
+    return sb_get("runs", {
+        "run_type": "eq.hydrate_listings", "run_at": f"gte.{cutoff_iso}",
+        "select": "lga_id,status,error_msg,new_count,updated_count,run_at",
+        "order": "run_at.asc",
+    })
+
+
+def get_burn_runs(cutoff_iso: str) -> list[dict] | None:
+    """Runs in the window that hit at least one HTTP 429. None if the
+    runs.burns column doesn't exist yet (sql/14_runs_burns.sql not run)."""
+    try:
+        return sb_get("runs", {
+            "burns": "gt.0", "run_at": f"gte.{cutoff_iso}",
+            "select": "lga_id,run_type,burns,run_at",
+            "order": "burns.desc",
+        })
+    except requests.HTTPError as e:
+        log.warning(f"Couldn't read runs.burns ({e}) — has sql/14_runs_burns.sql been run?")
+        return None
+
+
+def get_lga_names(ids: set) -> dict:
+    if not ids:
+        return {}
+    rows = sb_get("lgas", {"id": f"in.({','.join(str(i) for i in sorted(ids))})", "select": "id,name"})
+    return {r["id"]: r["name"] for r in rows}
+
+
 def dashboard_link(lga: dict) -> str:
     return f"{DASHBOARD_BASE_URL}?lga={lga['id']}&lgaName={urllib.parse.quote(lga['name'])}"
 
 
-def build_email_html(results: list[dict]) -> str:
+def build_hydration_section(hydrations: list[dict], names: dict) -> str:
+    if not hydrations:
+        return f'''
+      <div style="font-family:{FONT};font-size:11px;font-weight:700;color:#9a9a9a;text-transform:uppercase;letter-spacing:0.05em;margin:28px 0 8px;">Hydrations (last 24h)</div>
+      <div style="font-family:{FONT};font-size:12px;color:#9a9a9a;">None ran.</div>'''
+    bad = [h for h in hydrations if h["status"] != "ok"]
+    heading_color = RED if bad else "#9a9a9a"
+    heading = f"Hydrations (last 24h) — {len(bad)} need a look" if bad else f"Hydrations (last 24h) — all {len(hydrations)} clean"
+
+    def row(h):
+        ok = h["status"] == "ok"
+        mark = f'<span style="color:{GREEN};">&#10003;</span>' if ok else f'<span style="color:{RED};font-weight:700;">&#10007;</span>'
+        name = html.escape(names.get(h["lga_id"], f"LGA {h['lga_id']}"))
+        counts = f'{h.get("new_count") or 0:,} saved of {h.get("updated_count") or 0:,} collected'
+        err = "" if ok else f'<br><span style="color:{RED};">{html.escape(h.get("error_msg") or h["status"])}</span>'
+        return f'''<tr>
+          <td style="padding:6px 12px;border-bottom:1px solid #f3f3f3;font-family:{FONT};font-size:12px;color:#4a4a4a;">
+            {mark} {name} <span style="color:#c0c0c0;">(LGA {h['lga_id']})</span>
+          </td>
+          <td style="padding:6px 12px;border-bottom:1px solid #f3f3f3;font-family:{FONT};font-size:11px;color:#4a4a4a;text-align:right;">{counts}{err}</td>
+        </tr>'''
+
+    return f'''
+      <div style="font-family:{FONT};font-size:11px;font-weight:700;color:{heading_color};text-transform:uppercase;letter-spacing:0.05em;margin:28px 0 8px;">{heading}</div>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        {''.join(row(h) for h in hydrations)}
+      </table>'''
+
+
+def build_burns_section(burn_runs: list[dict] | None, names: dict) -> str:
+    title = f'<div style="font-family:{FONT};font-size:11px;font-weight:700;color:#9a9a9a;text-transform:uppercase;letter-spacing:0.05em;margin:28px 0 8px;">429 cookie burns (last 24h)</div>'
+    if burn_runs is None:
+        return title + f'<div style="font-family:{FONT};font-size:12px;color:#9a9a9a;">Not tracked yet — run sql/14_runs_burns.sql.</div>'
+    if not burn_runs:
+        return title + f'<div style="font-family:{FONT};font-size:12px;color:{GREEN};">&#10003; None.</div>'
+    total = sum(r["burns"] for r in burn_runs)
+    rows = "".join(f'''<tr>
+          <td style="padding:6px 12px;border-bottom:1px solid #f3f3f3;font-family:{FONT};font-size:12px;color:#4a4a4a;">
+            {html.escape(names.get(r["lga_id"], f"LGA {r['lga_id']}"))} <span style="color:#c0c0c0;">(LGA {r['lga_id']}) · {html.escape(r["run_type"])}</span>
+          </td>
+          <td style="padding:6px 12px;border-bottom:1px solid #f3f3f3;font-family:{FONT};font-size:12px;color:{ORANGE};font-weight:700;text-align:right;">{r["burns"]}</td>
+        </tr>''' for r in burn_runs)
+    return title + f'''
+      <div style="font-family:{FONT};font-size:13px;color:{ORANGE};font-weight:600;margin-bottom:8px;">{total} total across {len(burn_runs)} run(s)</div>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">{rows}</table>'''
+
+
+def build_email_html(results: list[dict], hydration_section: str = "", burns_section: str = "") -> str:
     failed = [r for r in results if not r["ok"]]
     ok = [r for r in results if r["ok"]]
 
@@ -136,6 +215,8 @@ def build_email_html(results: list[dict]) -> str:
   <tr><td style="background:#ffffff;border-radius:0 0 14px 14px;padding:8px 28px 28px;">
     {failed_section}
     {ok_section}
+    {hydration_section}
+    {burns_section}
   </td></tr>
 </table>
 </td></tr>
@@ -167,9 +248,24 @@ def main():
     results = build_region_results(lgas, latest_runs)
     failed_count = sum(1 for r in results if not r["ok"])
 
-    subject = f"MakeBank ops: {failed_count} region(s) failed last night" if failed_count else "MakeBank ops: all clear last night"
-    html = build_email_html(results)
-    send_email(html, subject)
+    cutoff_24h = (now - dt.timedelta(hours=24)).isoformat()
+    hydrations = get_hydrations(cutoff_24h)
+    burn_runs = get_burn_runs(cutoff_24h)
+    names = get_lga_names({h["lga_id"] for h in hydrations} | {r["lga_id"] for r in (burn_runs or [])})
+    hydration_failed = sum(1 for h in hydrations if h["status"] != "ok")
+    total_burns = sum(r["burns"] for r in (burn_runs or []))
+
+    problems = []
+    if failed_count:
+        problems.append(f"{failed_count} region(s) failed")
+    if hydration_failed:
+        problems.append(f"{hydration_failed} hydration(s) failed")
+    subject = "MakeBank ops: " + (", ".join(problems) if problems else "all clear") + " last night"
+    if total_burns:
+        subject += f" · {total_burns} cookie burn(s)"
+
+    html_body = build_email_html(results, build_hydration_section(hydrations, names), build_burns_section(burn_runs, names))
+    send_email(html_body, subject)
 
 
 if __name__ == "__main__":

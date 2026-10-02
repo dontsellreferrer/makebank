@@ -34,7 +34,10 @@ Env vars needed (Railway):
 """
 import os
 import tempfile
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Optional
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 import requests
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form
@@ -57,23 +60,39 @@ def home():
     return FileResponse(PUBLIC_DIR / "index.html")
 
 
-@app.post("/webhook/new-territory")
-async def relay_new_territory(request: Request):
-    """
-    Relays the Supabase webhook payload to the scraper VM instead of running
-    the hydration here. This endpoint's job is only: check the secret,
-    forward the payload, return the VM's response.
-    """
-    if WEBHOOK_SECRET:
-        auth = request.headers.get("authorization", "")
-        if auth != f"Bearer {WEBHOOK_SECRET}":
-            raise HTTPException(status_code=401, detail="Unauthorized")
+def _parse_ts(value) -> Optional[datetime]:
+    """Supabase/Postgres timestamptz -> aware datetime. Accepts '...Z',
+    '...+00:00', '...+00' and a space instead of 'T'."""
+    if not value:
+        return None
+    s = str(value).strip().replace(" ", "T").replace("Z", "+00:00")
+    if len(s) >= 3 and s[-3] in "+-" and s[-2:].isdigit():   # '+00' -> '+00:00'
+        s = s + ":00"
+    dt = datetime.fromisoformat(s)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
+
+def _claim_dispatch(sb, lga_id: int, stale_before: Optional[datetime] = None) -> bool:
+    """Atomically marks a territory as dispatched. Only succeeds if nobody has
+    dispatched it yet (or, for a retry, if its last dispatch is older than
+    stale_before) -- so the INSERT webhook, the VM's 15-minute dispatcher and
+    the admin "Hydrate now" button can never send the same region twice."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    q = sb.table("lgas").update({"hydrate_dispatched_at": now_iso}).eq("id", lga_id)
+    if stale_before:
+        q = q.or_(f"hydrate_dispatched_at.is.null,hydrate_dispatched_at.lt.{stale_before.isoformat()}")
+    else:
+        q = q.is_("hydrate_dispatched_at", "null")
+    return bool(q.execute().data)
+
+
+def _unclaim_dispatch(sb, lga_id: int):
+    sb.table("lgas").update({"hydrate_dispatched_at": None}).eq("id", lga_id).execute()
+
+
+def _forward_to_vm(payload: dict) -> dict:
     if not VM_URL:
         raise HTTPException(status_code=500, detail="HYDRATE_VM_URL not configured")
-
-    payload = await request.json()
-
     try:
         resp = requests.post(
             VM_URL,
@@ -84,8 +103,48 @@ async def relay_new_territory(request: Request):
         resp.raise_for_status()
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"VM relay failed: {e}")
-
     return resp.json()
+
+
+@app.post("/webhook/new-territory")
+async def relay_new_territory(request: Request):
+    """
+    Relays the Supabase webhook payload to the scraper VM instead of running
+    the hydration here. This endpoint's job is only: check the secret,
+    forward the payload, return the VM's response.
+
+    Scheduled hydration (added 28 Sep 2026, see sql/13_scheduled_hydration.sql):
+    a row with hydrate_after in the future is NOT forwarded -- the VM's
+    dispatch_scheduled_hydrations.py cron sends it once it's due. Rows with
+    no hydrate_after (order form, admin.html) behave exactly as before.
+    """
+    if WEBHOOK_SECRET:
+        auth = request.headers.get("authorization", "")
+        if auth != f"Bearer {WEBHOOK_SECRET}":
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not VM_URL:
+        raise HTTPException(status_code=500, detail="HYDRATE_VM_URL not configured")
+
+    payload = await request.json()
+    record = payload.get("record") or {}
+    hydrate_after = _parse_ts(record.get("hydrate_after"))
+
+    if hydrate_after is not None:
+        lga_id = record.get("id")
+        if hydrate_after > datetime.now(timezone.utc):
+            return {"status": "scheduled", "lga_id": lga_id, "hydrate_after": hydrate_after.isoformat()}
+        # Already due -- claim it first so the 15-minute dispatcher can't send it again.
+        sb = get_supabase()
+        if not _claim_dispatch(sb, lga_id):
+            return {"status": "already_dispatched", "lga_id": lga_id}
+        try:
+            return _forward_to_vm(payload)
+        except HTTPException:
+            _unclaim_dispatch(sb, lga_id)   # let the dispatcher pick it up on its next pass
+            raise
+
+    return _forward_to_vm(payload)
 
 
 @app.get("/health")
@@ -322,6 +381,158 @@ def recipient_detail(id: str):
     if not rows:
         raise HTTPException(status_code=404, detail="Not found")
     return rows[0]
+
+
+# ── Bulk / scheduled hydration (admin_hydration.html) ───────────────────────
+# Added 28 Sep 2026. Everything runs through the service-role key here rather
+# than widening anon grants on `lgas`. Deliberately narrow: the only rows
+# these endpoints can cancel or re-dispatch are scheduled ones (hydrate_after
+# set) that haven't finished hydrating -- nothing live can be touched.
+STUCK_AFTER_HOURS = 18   # dispatched this long ago and still not dated = assume lost (e.g. VM restart dropped its in-memory queue)
+
+
+def _with_sort(url: str, sort_value: str) -> str:
+    # Python twin of admin.html's withSort() -- forces REA's newest-first sort,
+    # which checkpoint dating and the sold cutoff both depend on.
+    parts = urlsplit(url)
+    q = dict(parse_qsl(parts.query, keep_blank_values=True))
+    q["activeSort"] = sort_value
+    return urlunsplit(parts._replace(query=urlencode(q)))
+
+
+def _derive_sold_url(buy_url: str) -> str:
+    return _with_sort(buy_url.replace("/buy/", "/sold/").replace("/buy?", "/sold?"), "solddate")
+
+
+def _validate_region_url(url: str) -> Optional[str]:
+    if "realestate.com.au" not in url:
+        return "not a realestate.com.au link"
+    if "/buy/" not in url and "/buy?" not in url:
+        return "needs to be a /buy/ search URL"
+    if "list-1" not in url:
+        return "missing 'list-1' (open page 1 of the search results and copy that URL)"
+    return None
+
+
+@app.get("/api/hydration-queue")
+def hydration_queue(limit: int = 300):
+    sb = get_supabase()
+    rows = (
+        sb.table("lgas")
+        .select("id,name,created_at,hydrate_after,hydrate_dispatched_at,dated,client_ready,active")
+        .not_.is_("hydrate_after", "null")
+        .order("hydrate_after", desc=True)
+        .order("id", desc=True)
+        .limit(min(max(limit, 1), 1000))
+        .execute()
+    ).data
+    return {"rows": rows, "stuck_after_hours": STUCK_AFTER_HOURS, "server_time": datetime.now(timezone.utc).isoformat()}
+
+
+@app.post("/api/hydration-queue")
+async def schedule_hydrations(request: Request):
+    """Body: {"hydrate_after": ISO timestamp, "regions": [{"name": ..., "url": ...}, ...]}
+    Inserts each region as a normal territory with hydrate_after set. The
+    Supabase INSERT webhook still fires, and the relay above ignores it until
+    it's due. Regions whose listings URL already exists are skipped."""
+    payload = await request.json()
+    when = _parse_ts(payload.get("hydrate_after"))
+    regions = payload.get("regions") or []
+    if when is None:
+        raise HTTPException(status_code=400, detail="hydrate_after required")
+    if not regions:
+        raise HTTPException(status_code=400, detail="No regions supplied")
+    if len(regions) > 200:
+        raise HTTPException(status_code=400, detail="Max 200 regions per batch")
+
+    rows, errors = [], []
+    for i, r in enumerate(regions, 1):
+        name = (r.get("name") or "").strip()
+        url = (r.get("url") or "").strip()
+        problem = "missing name" if not name else _validate_region_url(url)
+        if problem:
+            errors.append(f"Line {i} ({name or url or 'blank'}): {problem}")
+            continue
+        listings_url = _with_sort(url, "list-date")
+        rows.append({
+            "name": name[:200],
+            "active": True,
+            "search_url_listings": listings_url,
+            "search_url_sold": _derive_sold_url(listings_url),
+            "hydrate_after": when.isoformat(),
+        })
+    if errors:
+        raise HTTPException(status_code=400, detail="; ".join(errors))
+
+    sb = get_supabase()
+    existing = {
+        e["search_url_listings"]: e for e in (
+            sb.table("lgas").select("id,name,search_url_listings")
+            .in_("search_url_listings", [r["search_url_listings"] for r in rows])
+            .execute()
+        ).data
+    }
+    seen, to_insert, skipped = set(), [], []
+    for r in rows:
+        dup = existing.get(r["search_url_listings"])
+        if dup:
+            skipped.append(f"{r['name']} (already exists as LGA {dup['id']} — {dup['name']})")
+        elif r["search_url_listings"] in seen:
+            skipped.append(f"{r['name']} (duplicate URL in this batch)")
+        else:
+            seen.add(r["search_url_listings"])
+            to_insert.append(r)
+
+    inserted = sb.table("lgas").insert(to_insert).execute().data if to_insert else []
+    return {
+        "scheduled": [{"id": r["id"], "name": r["name"]} for r in inserted],
+        "skipped": skipped,
+        "hydrate_after": when.isoformat(),
+    }
+
+
+@app.post("/api/hydration-queue/{lga_id}/now")
+def hydrate_now(lga_id: int):
+    """Sends a scheduled region to the VM immediately. Also the Retry path for
+    a region that was dispatched but never hydrated (lost from the VM's
+    in-memory queue) -- allowed only once its dispatch is STUCK_AFTER_HOURS old."""
+    sb = get_supabase()
+    rows = sb.table("lgas").select("*").eq("id", lga_id).limit(1).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Region not found")
+    row = rows[0]
+    if row.get("hydrate_after") is None:
+        raise HTTPException(status_code=400, detail="Not a scheduled region — use the normal hydration path")
+    if row.get("dated"):
+        raise HTTPException(status_code=409, detail="Already hydrated")
+
+    stale_before = datetime.now(timezone.utc) - timedelta(hours=STUCK_AFTER_HOURS)
+    if not _claim_dispatch(sb, lga_id, stale_before=stale_before):
+        raise HTTPException(status_code=409, detail=f"Already dispatched — can only retry once it's been {STUCK_AFTER_HOURS}h with no hydration")
+    try:
+        result = _forward_to_vm({"type": "INSERT", "table": "lgas", "record": row})
+    except HTTPException:
+        _unclaim_dispatch(sb, lga_id)
+        raise
+    return {"status": "dispatched", "lga_id": lga_id, "vm": result}
+
+
+@app.delete("/api/hydration-queue/{lga_id}")
+def cancel_scheduled(lga_id: int):
+    """Removes a scheduled region that hasn't been sent to the VM yet. Nothing
+    has been scraped for it at that point, so deleting the row is clean."""
+    sb = get_supabase()
+    deleted = (
+        sb.table("lgas").delete()
+        .eq("id", lga_id)
+        .not_.is_("hydrate_after", "null")
+        .is_("hydrate_dispatched_at", "null")
+        .or_("dated.is.null,dated.eq.false")
+        .execute()
+    ).data
+    if not deleted:
+        raise HTTPException(status_code=409, detail="Can only cancel regions that haven't been dispatched yet")
+    return {"status": "cancelled", "lga_id": lga_id}
 
 
 # Serves /order.html, /dashboard.html, /export.html, /admin.html exactly as

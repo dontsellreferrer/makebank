@@ -82,6 +82,7 @@ import sys
 import base64
 import asyncio
 import logging
+import time
 import subprocess
 
 import requests
@@ -251,16 +252,34 @@ def hydrate(lga: dict):
     # then stays exactly as cron left it. Rick can now hand out a full
     # day's worth of new territories to a freelancer and not worry about
     # losing days of tracking while the CSV sits in their queue.
+    # Logged to `runs` as 'hydrate_listings' (added 2 Oct 2026) so the 06:00
+    # ops report can see hydrations at all -- a failed one never sets
+    # dated=true, so it was invisible to the report's per-region checks
+    # (Ballarat lost ~1,300 listings twice with the report saying all clear).
+    # new_count = saved, updated_count = collected, burns = 429s this step.
+    t_start = time.time()
+    burns_before = pool.burned_count
+    detail_stats = {}
+    collected = saved = 0
+    h_status, h_error = 'ok', ''
     try:
         log.info(f"Hydrating listings for {lga_name} (id={lga_id})")
         collector = URLCollector(pool, max_pages=MAX_PAGES)
         live_urls = collector.collect_urls(lga['search_url_listings'], known_urls=set())
-        log.info(f"Found {len(live_urls)} active listings")
-        rows = scrape_details_playwright(list(live_urls), pool) if live_urls else []
+        collected = len(live_urls)
+        log.info(f"Found {collected} active listings")
+        rows = scrape_details_playwright(list(live_urls), pool, lga_id=lga_id, stats=detail_stats) if live_urls else []
 
         store = LGAStore(sb, lga_id)
         saved = store.insert_new('listings', rows)
         log.info(f"Saved {saved} listing(s) for {lga_name} — first_seen = hydration time until the dated CSV corrects it")
+
+        # A handful of listings legitimately fail (taken down mid-run, 404),
+        # but anything under 90% saved means something went wrong.
+        if collected == 0:
+            h_status, h_error = 'warning', '0 listings collected'
+        elif saved < collected * 0.9:
+            h_status, h_error = 'warning', f'saved {saved} of {collected} collected'
 
         csv_content = build_csv(rows)
         email_csv(lga_id, lga_name, csv_content, len(rows), pool.burned_count)
@@ -268,7 +287,15 @@ def hydrate(lga: dict):
         sb.table('lgas').update({'dated': True}).eq('id', lga_id).execute()
         log.info(f"LGA {lga_id} marked dated=true immediately — cron-eligible from tonight, not waiting on CSV dating")
     except Exception as e:
+        h_status, h_error = 'error', str(e)
         log.error(f"Listings hydration failed for {lga_name}: {e}")
+
+    try:
+        burns = (pool.burned_count - burns_before) + detail_stats.get('429s', 0)
+        LGAStore(sb, lga_id).log_run('hydrate_listings', saved, 0, collected, h_status, h_error,
+                                     time.time() - t_start, burns=burns)
+    except Exception as e:
+        log.error(f"Couldn't log hydrate_listings run for {lga_name}: {e}")
 
     # --- Sold: no dating problem (sold_date is already known) — save as normal ---
     try:
