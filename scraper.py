@@ -756,6 +756,25 @@ class LGAStore:
             offset += page_size
         return urls
 
+    def get_urls_with_sold_date(self, table: str, statuses: list[str]) -> set[str]:
+        """URLs in the given statuses that already carry a sold_date. Paged
+        like get_urls_by_status()."""
+        urls, offset, page_size = set(), 0, 1000
+        while True:
+            resp = retry_on_disconnect(
+                lambda: (self.sb.table(table).select('url')
+                         .eq('lga_id', self.lga_id).in_('status', statuses)
+                         .not_.is_('sold_date', 'null')
+                         .order('id').range(offset, offset + page_size - 1).execute()),
+                f"get_urls_with_sold_date({table}, lga={self.lga_id})"
+            )
+            batch = [r['url'] for r in resp.data]
+            urls.update(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
+        return urls
+
     def get_removed_urls(self, table: str = 'listings') -> set[str]:
         return self.get_urls_by_status(table, ['removed'])
 
@@ -1276,8 +1295,18 @@ def run_reconcile(sb: Client, lga: dict):
         # Listing URLs don't have /sold/ — normalise sold URLs to match before comparing
         sold_urls = {u.replace('realestate.com.au/sold/', 'realestate.com.au/') for u in sold_urls_raw}
 
-        removed_not_sold = removed_listing_urls - sold_urls
-        removed_sold = removed_listing_urls & sold_urls
+        # A removed listing that already carries a sold_date IS sold, even if
+        # its sale isn't in this LGA's `sold` table (fix, 3 Oct 2026). Seen on
+        # Brunswick's first night: hydration captured three listings whose
+        # page already showed the sale (REA still had them in for-sale
+        # results), so they were saved with sold_date set. When they dropped
+        # out of the buy results they had no matching `sold` row, and landed
+        # on the Removed-Not-Sold hotlist despite their own record saying sold.
+        has_sold_date = store.get_urls_with_sold_date('listings', ['removed', 'removed_not_sold'])
+        known_sold = sold_urls | has_sold_date
+
+        removed_not_sold = removed_listing_urls - known_sold
+        removed_sold = removed_listing_urls & known_sold
 
         log.info(f"Removed from listings: {len(removed_listing_urls)}")
         log.info(f"  → Confirmed sold: {len(removed_sold)}")
@@ -1324,7 +1353,7 @@ def run_reconcile(sb: Client, lga: dict):
         # was never looked at again, so it stayed on the hotlist forever even
         # after it genuinely sold.
         existing_wns = store.get_removed_not_sold_urls('listings')
-        wns_now_sold = existing_wns & sold_urls
+        wns_now_sold = existing_wns & known_sold
 
         if wns_now_sold:
             sold_dates = _fetch_sold_dates(sb, lga_id, sold_urls_raw, wns_now_sold)
