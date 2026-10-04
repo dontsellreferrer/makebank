@@ -539,7 +539,7 @@ MAX_REMOVAL_CHECKS = 150   # per region per night; beyond this, keep the rest (u
 
 def verify_removals(urls: set[str], pool: CookiePool, lga_id: Optional[int] = None) -> dict:
     """Returns {'sold': set, 'withdrawn': set, 'live': set, 'unknown': set}."""
-    out = {'sold': set(), 'withdrawn': set(), 'live': set(), 'unknown': set()}
+    out = {'sold': set(), 'withdrawn': set(), 'live': set(), 'unknown': set(), 'sold_dates': {}}
     if not urls:
         return out
     todo = list(urls)
@@ -598,6 +598,12 @@ def verify_removals(urls: set[str], pool: CookiePool, lga_id: Optional[int] = No
                     pool.burn(idx)
                 elif '/sold/' in final_url:
                     verdict = 'sold'
+                    try:
+                        d = parse_detail(page.content(), url)
+                        if d and d.get('sold_date'):
+                            out['sold_dates'][url] = d['sold_date']
+                    except Exception:
+                        pass
                 elif status in (404, 410):
                     verdict = 'withdrawn'
                 elif status == 200:
@@ -802,6 +808,34 @@ class LGAStore:
             )
             inserted += len(chunk)
         return inserted
+
+    def mark_sold(self, urls: set[str], sold_dates: Optional[dict] = None, stamp_removed: bool = True) -> int:
+        """Listings confirmed sold by their own REA page (redirect to /sold/)
+        -- set straight to 'sold' rather than 'removed' (fix, 4 Oct 2026).
+        Going via 'removed' left them to reconcile, which only knows a sale
+        once it appears in REA's sold *search* -- often days later -- so in
+        the meantime they sat on the hotlist as withdrawn."""
+        if not urls:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        url_list = list(urls)
+        fields = {'status': 'sold', 'last_seen': now}
+        if stamp_removed:
+            fields['removed_at'] = now
+        for i in range(0, len(url_list), 100):
+            chunk = url_list[i:i+100]
+            retry_on_disconnect(
+                lambda c=chunk: self.sb.table('listings').update(fields).eq('lga_id', self.lga_id).in_('url', c).execute(),
+                f"mark_sold(lga={self.lga_id}, chunk of {len(chunk)})"
+            )
+        for url, sd in (sold_dates or {}).items():
+            if url in urls:
+                retry_on_disconnect(
+                    lambda u=url, d=sd: self.sb.table('listings').update({'sold_date': d}).eq('lga_id', self.lga_id).eq('url', u).execute(),
+                    f"mark_sold sold_date(lga={self.lga_id})"
+                )
+        log.info(f"  Marked sold (confirmed on REA): {len(url_list)}")
+        return len(url_list)
 
     def mark_removed(self, table: str, urls: set[str]) -> int:
         if not urls:
@@ -1190,7 +1224,8 @@ def run_scrape_phase1(sb: Client, pool: CookiePool, lga: dict, run_type: str, ma
         # Confirm each listing removal against its own page (see verify_removals).
         if table == 'listings' and removed_urls:
             checked = verify_removals(removed_urls, pool, lga_id=lga_id)
-            removed_urls = checked['sold'] | checked['withdrawn']
+            removed_urls = checked['withdrawn']
+            removed_count += store.mark_sold(checked['sold'], checked['sold_dates'])
             if checked['unknown'] and status == 'ok':
                 status = 'warning'
                 error_msg = f"{len(checked['unknown'])} removal candidate(s) couldn't be checked — kept active, re-checked tomorrow"
@@ -1215,7 +1250,7 @@ def run_scrape_phase1(sb: Client, pool: CookiePool, lga: dict, run_type: str, ma
                 removed_count = store.delete_urls(table, removed_urls)
             else:
                 log.info(f"Marking {len(removed_urls)} as removed...")
-                removed_count = store.mark_removed(table, removed_urls)
+                removed_count += store.mark_removed(table, removed_urls)
         else:
             log.info("No removals")
 
@@ -1595,6 +1630,9 @@ def recheck_hotlist(sb: Client, days: int, lga_ids: Optional[list[int]] = None):
             continue
         log.info(f"Re-checking {len(urls)} hotlist listing(s) for {lga['name']} ({lga['id']})")
         checked = verify_removals(urls, pool, lga_id=lga['id'])
+        if checked['sold']:
+            LGAStore(sb, lga['id']).mark_sold(checked['sold'], checked['sold_dates'], stamp_removed=False)
+            log.info(f"  → {len(checked['sold'])} confirmed sold — off the hotlist")
         if checked['live']:
             LGAStore(sb, lga['id']).reactivate('listings', checked['live'])
             total_live += len(checked['live'])
