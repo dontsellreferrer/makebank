@@ -522,6 +522,111 @@ def scrape_details_playwright(urls: list[str], pool: CookiePool, lga_id: Optiona
 
     return results
 
+# ── Removal check: confirm a listing is really gone before removing it ───────
+# Added 4 Oct 2026. Phase 1 used to mark a listing removed simply because it
+# didn't appear in tonight's search results. All pages were loading fine, yet
+# live listings were still being missed (Tweed Shire, 4 Oct: Kingscliff,
+# Tweed Heads and Chillingham listings on the hotlist while still for sale on
+# REA) -- most likely REA's date-only sort returning same-day listings in a
+# different order on each page request, so some slip between page boundaries.
+# Now every removal candidate's own page is opened first:
+#   redirected to /sold/...           -> sold        -> remove
+#   HTTP 404 / "off the market" page  -> withdrawn   -> remove
+#   normal listing page (address h1)  -> still live  -> keep active
+#   anything else (429, block, error) -> unknown     -> keep, re-check tomorrow
+# A genuine withdrawal can wait a night; a false lead in a client email can't.
+MAX_REMOVAL_CHECKS = 150   # per region per night; beyond this, keep the rest (unknown) and flag it
+
+def verify_removals(urls: set[str], pool: CookiePool, lga_id: Optional[int] = None) -> dict:
+    """Returns {'sold': set, 'withdrawn': set, 'live': set, 'unknown': set}."""
+    out = {'sold': set(), 'withdrawn': set(), 'live': set(), 'unknown': set()}
+    if not urls:
+        return out
+    todo = list(urls)
+    if len(todo) > MAX_REMOVAL_CHECKS:
+        out['unknown'].update(todo[MAX_REMOVAL_CHECKS:])
+        todo = todo[:MAX_REMOVAL_CHECKS]
+        log.warning(f"  Removal check: {len(urls)} candidates, checking first {MAX_REMOVAL_CHECKS} — rest kept for tomorrow")
+
+    def parse_cookie_str(cookie_str):
+        cookies = []
+        for part in cookie_str.split(';'):
+            part = part.strip()
+            if '=' in part:
+                name, _, value = part.partition('=')
+                cookies.append({'name': name.strip(), 'value': value.strip(),
+                                'domain': '.realestate.com.au', 'path': '/'})
+        return cookies
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+
+        def relaunch():
+            nonlocal browser
+            try:
+                browser.close()
+            except Exception:
+                pass
+            browser = p.chromium.launch(headless=True)
+
+        for i, url in enumerate(todo, 1):
+            if pool.empty:
+                out['unknown'].update(todo[i - 1:])
+                log.warning("  Removal check: cookie pool empty — remaining candidates kept for tomorrow")
+                break
+            try:
+                idx = random.randrange(len(pool.cookies))
+                ctx = browser.new_context(user_agent=pool.agents[idx], viewport={'width': 1366, 'height': 768},
+                                          locale='en-AU', timezone_id='Australia/Sydney')
+            except Exception:
+                try:
+                    relaunch()
+                    ctx = browser.new_context(user_agent=pool.agents[idx], viewport={'width': 1366, 'height': 768},
+                                              locale='en-AU', timezone_id='Australia/Sydney')
+                except Exception as e:
+                    log.warning(f"  Removal check: browser unavailable ({e}) — keeping {url}")
+                    out['unknown'].add(url)
+                    continue
+            verdict = 'unknown'
+            try:
+                ctx.add_cookies(parse_cookie_str(pool.cookies[idx]))
+                page = ctx.new_page()
+                response = page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                status = response.status if response else None
+                final_url = page.url or ''
+                if status == 429:
+                    pool.burn(idx)
+                elif '/sold/' in final_url:
+                    verdict = 'sold'
+                elif status in (404, 410):
+                    verdict = 'withdrawn'
+                elif status == 200:
+                    html = page.content()
+                    if 'off the market' in html.lower() and 'property-info-address' not in html:
+                        verdict = 'withdrawn'
+                    elif parse_detail(html, url):
+                        verdict = 'live'
+            except Exception as e:
+                log.warning(f"  Removal check error on {url}: {e}")
+            finally:
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+            out[verdict].add(url)
+            log.info(f"  [check {i}/{len(todo)}] {verdict:9} {url}")
+            time.sleep(random.uniform(2, 5))
+
+        try:
+            browser.close()
+        except Exception:
+            pass
+
+    log.info(f"  Removal check (LGA {lga_id}): {len(urls)} candidates → sold {len(out['sold'])}, "
+             f"withdrawn {len(out['withdrawn'])}, still live {len(out['live'])} (kept), unknown {len(out['unknown'])} (kept)")
+    return out
+
+
 def parse_detail(html: str, url: str) -> Optional[dict]:
     """Parse address/agent/agency from rendered HTML."""
     soup = BeautifulSoup(html, 'html.parser')
@@ -1082,6 +1187,14 @@ def run_scrape_phase1(sb: Client, pool: CookiePool, lga: dict, run_type: str, ma
             status = 'error'
             removed_urls = set()
 
+        # Confirm each listing removal against its own page (see verify_removals).
+        if table == 'listings' and removed_urls:
+            checked = verify_removals(removed_urls, pool, lga_id=lga_id)
+            removed_urls = checked['sold'] | checked['withdrawn']
+            if checked['unknown'] and status == 'ok':
+                status = 'warning'
+                error_msg = f"{len(checked['unknown'])} removal candidate(s) couldn't be checked — kept active, re-checked tomorrow"
+
         # Queue new URLs for Phase 2 rather than detail-scraping now.
         if new_urls:
             rows = [{'lga_id': lga_id, 'run_type': run_type, 'url': u} for u in new_urls]
@@ -1410,6 +1523,26 @@ def run_reconcile(sb: Client, lga: dict):
                 )
                 sold_detail_rows.extend(resp.data)
 
+            # Only sales AFTER tracking began can be judged off-market (fix,
+            # 4 Oct 2026). Hydration loads the last 30 days of sales but only
+            # today's active listings, so every sale from those 30 days was
+            # being flagged off-market on day one -- ~2,100 across 29 regions,
+            # each also counted as a fake new listing. Tracking start = the
+            # region's start date (below); a
+            # sale with no sold_date can't be placed, so it's skipped too.
+            # Tracking start = when the region was scheduled to hydrate, else
+            # when it was created -- NOT the earliest listing first_seen, which
+            # a dated-CSV import pushes back months.
+            tracking_start = str(lga.get('hydrate_after') or lga.get('created_at') or '')[:10]
+            if not tracking_start:
+                row = sb.table('lgas').select('created_at,hydrate_after').eq('id', lga_id).limit(1).execute().data
+                tracking_start = str((row[0].get('hydrate_after') or row[0].get('created_at')) if row else '')[:10]
+            before = len(sold_detail_rows)
+            sold_detail_rows = [r for r in sold_detail_rows
+                                if tracking_start and r.get('sold_date') and str(r['sold_date'])[:10] > tracking_start]
+            if before != len(sold_detail_rows):
+                log.info(f"  Off-market check: skipped {before - len(sold_detail_rows)} sale(s) dated on/before tracking start ({tracking_start})")
+
             now_iso = datetime.now(timezone.utc).isoformat()
             backfill_records = [{
                 'lga_id': lga_id,
@@ -1443,6 +1576,32 @@ def run_reconcile(sb: Client, lga: dict):
     log.info(f"Reconcile complete in {duration:.1f}s" if status == 'ok' else f"Reconcile FAILED after {duration:.1f}s: {error_msg}")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+def recheck_hotlist(sb: Client, days: int, lga_ids: Optional[list[int]] = None):
+    """One-off cleanup (added 4 Oct 2026) for listings wrongly put on the
+    hotlist before verify_removals() existed. Live ones go back to active
+    (reactivate() keeps first_seen); sold/withdrawn/unknown are left alone --
+    reconcile handles sold ones as usual."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    query = sb.table('lgas').select('id,name').eq('active', True).eq('dated', True)
+    if lga_ids:
+        query = query.in_('id', lga_ids)
+    pool = CookiePool(COOKIES_FILE)
+    total_live = 0
+    for lga in query.execute().data:
+        rows = (sb.table('listings').select('url').eq('lga_id', lga['id'])
+                .eq('status', 'removed_not_sold').gte('removed_at', cutoff).execute()).data
+        urls = {r['url'] for r in rows}
+        if not urls:
+            continue
+        log.info(f"Re-checking {len(urls)} hotlist listing(s) for {lga['name']} ({lga['id']})")
+        checked = verify_removals(urls, pool, lga_id=lga['id'])
+        if checked['live']:
+            LGAStore(sb, lga['id']).reactivate('listings', checked['live'])
+            total_live += len(checked['live'])
+            log.info(f"  → {len(checked['live'])} still live — back to active, off the hotlist")
+    log.info(f"Hotlist re-check done: {total_live} live listing(s) restored across all regions")
+
+
 def main():
     parser = argparse.ArgumentParser(description='REA Scraper')
     parser.add_argument('--lga', type=int, nargs='+')
@@ -1466,9 +1625,17 @@ def main():
                               'Never use this in a scheduled/cron run: an undated territory has no '
                               'real listings baseline yet, so a normal run would stamp first_seen='
                               'today on everything it finds, silently corrupting the dating.')
+    parser.add_argument('--recheck-hotlist', type=int, metavar='DAYS',
+                         help='One-off: re-check every removed_not_sold listing removed in the last DAYS '
+                              'days against its own REA page (see verify_removals) and put any that are '
+                              'still live back to active. Combine with --lga to limit regions.')
     args = parser.parse_args()
 
     sb = get_supabase()
+
+    if args.recheck_hotlist:
+        recheck_hotlist(sb, args.recheck_hotlist, args.lga)
+        return
 
     if args.import_csv:
         if not args.lga:
