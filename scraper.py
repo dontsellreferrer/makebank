@@ -633,6 +633,54 @@ def verify_removals(urls: set[str], pool: CookiePool, lga_id: Optional[int] = No
     return out
 
 
+WNS_RECHECK_DAYS = 7   # every run re-checks hotlist entries withdrawn within this many days
+
+
+def verify_listing_removals(store: 'LGAStore', pool: CookiePool, lga_id: int, removed_urls: set[str]) -> tuple[set[str], int, int]:
+    """Confirm each listing removal against its own REA page before it goes
+    anywhere near the hotlist. Shared by every run path (cron phase 1 AND the
+    single-pass manual run) -- added 7 Oct 2026 after a manual re-run skipped
+    this and put 3 sold Glenelg SS listings on the hotlist as withdrawn.
+    Returns (withdrawn_urls_to_mark_removed, sold_count, unknown_count).
+    Live and unknown candidates are left untouched (stay active)."""
+    if not removed_urls:
+        return set(), 0, 0
+    checked = verify_removals(removed_urls, pool, lga_id=lga_id)
+    sold_count = store.mark_sold(checked['sold'], checked['sold_dates'])
+    return checked['withdrawn'], sold_count, len(checked['unknown'])
+
+
+def recheck_recent_wns(sb: Client, store: 'LGAStore', pool: CookiePool, lga_id: int,
+                       days: int = WNS_RECHECK_DAYS) -> dict:
+    """Re-open every removed_not_sold listing withdrawn in the last `days`
+    days. Catches the common under-offer pattern: agent withdraws the
+    listing, then marks it sold days later once contracts exchange -- which
+    the sold search can miss entirely (e.g. surrounding-suburb sales in SS
+    regions sit beyond the 30-day cutoff on REA's stacked results).
+    Sold -> status sold with real sold_date (removed_at kept as-is).
+    Live -> back to active (first_seen untouched).
+    Withdrawn/unknown -> left on the hotlist, re-checked next run.
+    Runs as part of EVERY listings run (cron or manual) -- added 7 Oct 2026."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    rows = (sb.table('listings').select('url').eq('lga_id', lga_id)
+            .eq('status', 'removed_not_sold').gte('removed_at', cutoff).execute()).data
+    urls = {r['url'] for r in rows}
+    out = {'checked': len(urls), 'sold': 0, 'live': 0, 'unknown': 0}
+    if not urls:
+        log.info(f"WNS re-check (last {days}d): nothing to check")
+        return out
+    log.info(f"WNS re-check (last {days}d): {len(urls)} hotlist listing(s)")
+    checked = verify_removals(urls, pool, lga_id=lga_id)
+    if checked['sold']:
+        out['sold'] = store.mark_sold(checked['sold'], checked['sold_dates'], stamp_removed=False)
+    if checked['live']:
+        out['live'] = store.reactivate('listings', checked['live'])
+    out['unknown'] = len(checked['unknown'])
+    log.info(f"WNS re-check done: {out['sold']} now sold, {out['live']} live again, "
+             f"{len(checked['withdrawn'])} still withdrawn, {out['unknown']} unknown")
+    return out
+
+
 def parse_detail(html: str, url: str) -> Optional[dict]:
     """Parse address/agent/agency from rendered HTML."""
     soup = BeautifulSoup(html, 'html.parser')
@@ -1145,6 +1193,14 @@ def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages
             reactivated_count = store.reactivate(table, reactivated_urls)
             log.info(f"Reactivated {reactivated_count} rows")
 
+        # Confirm each listing removal against its own page (same as cron phase 1).
+        if table == 'listings' and removed_urls:
+            removed_urls, sold_count, unknown_count = verify_listing_removals(store, pool, lga_id, removed_urls)
+            removed_count += sold_count
+            if unknown_count and status == 'ok':
+                status = 'warning'
+                error_msg = f"{unknown_count} removal candidate(s) couldn't be checked — kept active, re-checked tomorrow"
+
         # Mark removed (listings) or hard-delete (sold — 30-day rolling window)
         if removed_urls:
             if table == 'sold':
@@ -1152,9 +1208,14 @@ def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages
                 removed_count = store.delete_urls(table, removed_urls)
             else:
                 log.info(f"Marking {len(removed_urls)} as removed...")
-                removed_count = store.mark_removed(table, removed_urls)
+                removed_count += store.mark_removed(table, removed_urls)
         else:
             log.info("No removals")
+
+        # Re-check recent hotlist entries (skipped if Phase 1 safety-aborted —
+        # cookies are likely dead, so every check would just come back unknown).
+        if table == 'listings' and not error_msg.startswith('SAFETY ABORT'):
+            recheck_recent_wns(sb, store, pool, lga_id)
 
     except Exception as e:
         status = 'error'
@@ -1223,12 +1284,11 @@ def run_scrape_phase1(sb: Client, pool: CookiePool, lga: dict, run_type: str, ma
 
         # Confirm each listing removal against its own page (see verify_removals).
         if table == 'listings' and removed_urls:
-            checked = verify_removals(removed_urls, pool, lga_id=lga_id)
-            removed_urls = checked['withdrawn']
-            removed_count += store.mark_sold(checked['sold'], checked['sold_dates'])
-            if checked['unknown'] and status == 'ok':
+            removed_urls, sold_count, unknown_count = verify_listing_removals(store, pool, lga_id, removed_urls)
+            removed_count += sold_count
+            if unknown_count and status == 'ok':
                 status = 'warning'
-                error_msg = f"{len(checked['unknown'])} removal candidate(s) couldn't be checked — kept active, re-checked tomorrow"
+                error_msg = f"{unknown_count} removal candidate(s) couldn't be checked — kept active, re-checked tomorrow"
 
         # Queue new URLs for Phase 2 rather than detail-scraping now.
         if new_urls:
@@ -1253,6 +1313,9 @@ def run_scrape_phase1(sb: Client, pool: CookiePool, lga: dict, run_type: str, ma
                 removed_count += store.mark_removed(table, removed_urls)
         else:
             log.info("No removals")
+
+        if table == 'listings' and not error_msg.startswith('SAFETY ABORT'):
+            recheck_recent_wns(sb, store, pool, lga_id)
 
     except Exception as e:
         status = 'error'
