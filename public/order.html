@@ -300,12 +300,17 @@ function deriveSoldUrl(buyUrl) {
 // surrounding suburbs — so the sold search's 30-day cutoff never reaches the
 // second block and off-market sales are only detected for the main suburb.
 // Disclose it at order time; a drawn area (geoShape) returns one ordered list.
+// REA includes surrounding suburbs on suburb searches BY DEFAULT — the URL
+// only carries includeSurrounding=false when the box is unticked (confirmed
+// 7 Oct 2026). So: a suburb search (postcode in the /in-... path) is SS
+// unless it says includeSurrounding=false. Drawn areas (geoShape) and
+// region searches ("greater region", no postcode) aren't affected.
 function isSurroundingSearch(url) {
-  try {
-    return new URL(url).searchParams.get('includeSurrounding') === 'true';
-  } catch {
-    return /includeSurrounding=true/i.test(url || '');
-  }
+  let u;
+  try { u = new URL(url); } catch { return false; }
+  if (u.searchParams.has('geoShape')) return false;
+  if (u.searchParams.get('includeSurrounding') === 'false') return false;
+  return /\/in-[^/]*\+\d{4}/.test(decodeURIComponent(u.pathname));
 }
 function updateSSNotice() {
   const url = document.getElementById('region_url').value.trim();

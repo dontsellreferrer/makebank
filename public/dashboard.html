@@ -900,7 +900,21 @@ function renderRegionNote() {
 // 30-day cutoff inside the first block, so off-market sales are only
 // detected for the primary suburb. Listed sales, fast sales and hotlists are
 // unaffected (withdrawn/sold listings are confirmed on their own pages).
+// Same rule as order.html: REA includes surrounding suburbs on suburb
+// searches by default, so a suburb search (postcode in the /in-... path) is
+// SS unless it says includeSurrounding=false. Region (GR) and drawn (geoShape)
+// searches are unaffected. Falls back to the region name if the URL is missing.
+let LGA_SEARCH_URL = '';
 function isSSRegion() {
+  if (LGA_SEARCH_URL) {
+    let u;
+    try { u = new URL(LGA_SEARCH_URL); } catch { u = null; }
+    if (u) {
+      if (u.searchParams.has('geoShape')) return false;
+      if (u.searchParams.get('includeSurrounding') === 'false') return false;
+      return /\/in-[^/]*\+\d{4}/.test(decodeURIComponent(u.pathname));
+    }
+  }
   return /(\bSS$)|surrounding suburbs/i.test((CONFIG.lgaName || '').trim());
 }
 function ssPrimarySuburb() {
@@ -968,7 +982,7 @@ async function load() {
   document.getElementById('hero-territory').textContent = CONFIG.lgaName;
 
   const [lgaInfo, expiringSoon, expiredAll, expiredToday, fsboAll, totalActiveRows, totalActiveCount] = await Promise.all([
-    sb('lgas', `id=eq.${lga}&select=created_at&limit=1`),
+    sb('lgas', `id=eq.${lga}&select=created_at,search_url_listings&limit=1`),
     sb('listings', `lga_id=eq.${lga}&status=eq.active&first_seen=gte.${days90}&first_seen=lte.${days75}&select=address,agent,agency,url,first_seen&order=first_seen.asc&limit=500`),
     sb('listings', `lga_id=eq.${lga}&status=eq.active&first_seen=lte.${days90}&select=address,agent,agency,url,first_seen&order=first_seen.asc&limit=500`),
     sb('listings', `lga_id=eq.${lga}&status=eq.active&first_seen=gte.${days90Start}&first_seen=lt.${days90End}&select=address,agent,agency,url,first_seen&order=first_seen.asc&limit=500`),
@@ -978,6 +992,7 @@ async function load() {
   ]);
 
   LGA_CREATED_AT = lgaInfo.data[0]?.created_at || null;
+  LGA_SEARCH_URL = lgaInfo.data[0]?.search_url_listings || '';
 
   SNAPSHOT = {
     expiringSoon: expiringSoon.data,
