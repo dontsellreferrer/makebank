@@ -670,8 +670,9 @@ function renderContent() {
     // see all my listings" objection a free-trial principal raises, and the
     // answer is always the same: the region boundary, not a bug.
     const regionNoteHtml = CONFIG.recipientId ? renderRegionNote() : '';
+    const offmarketNoteHtml = (lbMetric === 'offmarket' && isSSRegion()) ? renderOffmarketNote() : '';
 
-    bodyEl.innerHTML = regionNoteHtml + rows.map((r, i) => {
+    bodyEl.innerHTML = offmarketNoteHtml + regionNoteHtml + rows.map((r, i) => {
       const name = view === 'agent' ? r.agent : r.agency;
       const sub  = view === 'agent' ? r.agency : '';
       const pct  = total ? (r.count / total * 100).toFixed(1) : '0.0';
@@ -889,6 +890,39 @@ function renderRegionNote() {
       <br><br>
       Regularly listing outside this area? <a href="/order.html?${params.toString()}">Create your own region &rarr;</a>
       covering exactly where you actually work.
+    </div>
+  </div>`;
+}
+
+// Off-market caveat for "surrounding suburbs" regions (added 7 Oct 2026).
+// REA returns an SS search as two stacked date-ordered blocks: the primary
+// suburb first, then the surrounding suburbs. The sold search stops at the
+// 30-day cutoff inside the first block, so off-market sales are only
+// detected for the primary suburb. Listed sales, fast sales and hotlists are
+// unaffected (withdrawn/sold listings are confirmed on their own pages).
+function isSSRegion() {
+  return /(\bSS$)|surrounding suburbs/i.test((CONFIG.lgaName || '').trim());
+}
+function ssPrimarySuburb() {
+  return (CONFIG.lgaName || '').trim()
+    .replace(/\s+(and\s+)?(SS|surrounding suburbs)$/i, '').trim() || CONFIG.lgaName;
+}
+function toggleOffmarketNote() {
+  const el = document.getElementById('offmarket-note-body');
+  if (el) el.classList.toggle('show');
+}
+function renderOffmarketNote() {
+  return `<div class="region-note">
+    <button class="region-note-link" onclick="toggleOffmarketNote()">(?) Off-market sales in this region</button>
+    <div class="region-note-body" id="offmarket-note-body">
+      For surrounding-suburbs regions, off-market sales are only reported for
+      <strong>${ssPrimarySuburb()}</strong>. Off-market sales in the surrounding suburbs may not appear,
+      so this list may be incomplete.
+      <br><br>
+      Listed sales, fast sales and the hotlists cover the whole region and aren't affected.
+      <br><br>
+      Want complete off-market reporting? <a href="/order.html">Set up a drawn region &rarr;</a>
+      covering exactly where you work.
     </div>
   </div>`;
 }

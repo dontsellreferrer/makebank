@@ -47,6 +47,9 @@ form{padding:48px 0 100px;}
 .f-field input::placeholder, .f-field textarea::placeholder{color:var(--muted-2);}
 .f-hint{font-size:12px;font-weight:300;color:var(--muted-2);margin-top:8px;line-height:1.6;}
 .f-hint a{color:var(--muted);text-decoration:underline;}
+.ss-notice{display:none;margin-top:12px;padding:12px 14px;border-left:3px solid var(--orange);background:var(--bg-2);border-radius:4px;font-size:12px;font-weight:300;color:var(--muted);line-height:1.7;}
+.ss-notice.show{display:block;}
+.ss-notice strong{color:var(--cream);font-weight:600;display:block;margin-bottom:4px;}
 .why-pop{margin-top:6px;}
 .why-pop summary{cursor:pointer;color:var(--muted);text-decoration:underline;list-style:none;}
 .why-pop summary::-webkit-details-marker{display:none;}
@@ -117,6 +120,12 @@ form{padding:48px 0 100px;}
         <details class="why-pop"><summary>Max 1,000 active listings — why?</summary>
           <p>Past 1,000, a genuinely old listing can get first-scraped weeks into tracking and falsely show up as &ldquo;new&rdquo; &mdash; so we keep territories well clear of that, not just under realestate.com.au&rsquo;s own 2,000-listing display cap.</p>
         </details>
+      </div>
+      <div class="ss-notice" id="ss-notice">
+        <strong>Heads up &mdash; this search includes surrounding suburbs.</strong>
+        That works fine for listings, sales and hotlists, but off-market sales will only be reported for the main suburb you searched &mdash; not the surrounding ones.
+        If off-market sales matter to you, draw your area on the map instead: on realestate.com.au, choose <em>Draw on map</em>, outline where you work, then paste that URL here.
+        Otherwise you're good to go as is.
       </div>
     </div>
   </div>
@@ -231,7 +240,7 @@ function currentButtonLabel() {
   if (qp.get('agency'))     document.getElementById('agency').value = qp.get('agency');
   if (qp.get('email'))      document.getElementById('email').value = email;
   if (qp.get('phone'))      document.getElementById('phone').value = qp.get('phone');
-  if (qp.get('region_url')) document.getElementById('region_url').value = qp.get('region_url');
+  if (qp.get('region_url')) { document.getElementById('region_url').value = qp.get('region_url'); updateSSNotice(); }
   // Mirror into the first (already-created) recipient row too, since it's
   // almost always the same person receiving their own reports.
   if (name || email) {
@@ -285,6 +294,25 @@ function deriveSoldUrl(buyUrl) {
   const soldUrl = buyUrl.replace('/buy/', '/sold/').replace('/buy?', '/sold?');
   return withSort(soldUrl, 'solddate');
 }
+
+// Surrounding-suburbs searches (added 7 Oct 2026): REA returns these as two
+// stacked date-ordered blocks — the searched suburb first, then the
+// surrounding suburbs — so the sold search's 30-day cutoff never reaches the
+// second block and off-market sales are only detected for the main suburb.
+// Disclose it at order time; a drawn area (geoShape) returns one ordered list.
+function isSurroundingSearch(url) {
+  try {
+    return new URL(url).searchParams.get('includeSurrounding') === 'true';
+  } catch {
+    return /includeSurrounding=true/i.test(url || '');
+  }
+}
+function updateSSNotice() {
+  const url = document.getElementById('region_url').value.trim();
+  document.getElementById('ss-notice').classList.toggle('show', isSurroundingSearch(url));
+}
+document.getElementById('region_url').addEventListener('input', updateSSNotice);
+document.getElementById('region_url').addEventListener('change', updateSSNotice);
 
 function showStatus(msg, ok) {
   const el = document.getElementById('status-msg');
