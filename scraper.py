@@ -357,6 +357,7 @@ class URLCollector:
         if known_urls is None:
             known_urls = set()
 
+        self._last_failed_pages = 0
         self._start_browser()
         try:
             total = self.get_total_pages(base_url)
@@ -367,12 +368,15 @@ class URLCollector:
             url_template = base_url.replace('list-1', 'list-{}')
             all_live_urls = []
             new_urls = []
+            failed_pages = 0
 
             for page in range(1, total + 1):
                 page_url = url_template.format(page)
                 log.info(f"  Page {page}/{total}")
                 soup = self._get_soup(page_url)
                 if not soup:
+                    failed_pages += 1
+                    log.warning(f"    Page {page} failed — its URLs can't be seen this run")
                     continue
 
                 found = ['https://www.realestate.com.au' + a.get('href')
@@ -400,6 +404,7 @@ class URLCollector:
 
         # Store all live URLs on self so run_scrape can compute removals
         self._last_all_live_urls = set(all_live_urls)
+        self._last_failed_pages = failed_pages
         return new_urls
 
 # ── Phase 2: Detail scrape via Playwright ─────────────────────────────────────
@@ -1177,6 +1182,15 @@ def run_scrape(sb: Client, pool: CookiePool, lga: dict, run_type: str, max_pages
             status = 'error'
             removed_urls = set()  # Clear removals — do not mark anything
 
+        # Same guard as phase 1 -- see run_scrape_phase1.
+        elif collector._last_failed_pages:
+            log.warning(f"{collector._last_failed_pages} search page(s) failed — skipping "
+                        f"{len(removed_urls)} removal(s) this run, re-checked next run")
+            status = 'warning'
+            error_msg = (f"{collector._last_failed_pages} search page(s) failed — "
+                         f"removals skipped this run, re-checked next run")
+            removed_urls = set()
+
         # Phase 2: Playwright detail scrape for new URLs only
         if new_urls:
             log.info(f"Phase 2: Playwright scraping {len(new_urls)} new listings...")
@@ -1280,6 +1294,18 @@ def run_scrape_phase1(sb: Client, pool: CookiePool, lga: dict, run_type: str, ma
             )
             log.error(error_msg)
             status = 'error'
+            removed_urls = set()
+
+        # A failed search page means every URL on it looks "gone" -- for sold
+        # that used to hard-delete real sales (Ballarat, 8 Oct 2026: 4 of the
+        # week's sales deleted after 429s on a sold page). Skip removals and
+        # deletions entirely for this run; the next clean run catches up.
+        elif collector._last_failed_pages:
+            log.warning(f"{collector._last_failed_pages} search page(s) failed — skipping "
+                        f"{len(removed_urls)} removal(s) this run, re-checked next run")
+            status = 'warning'
+            error_msg = (f"{collector._last_failed_pages} search page(s) failed — "
+                         f"removals skipped this run, re-checked next run")
             removed_urls = set()
 
         # Confirm each listing removal against its own page (see verify_removals).
