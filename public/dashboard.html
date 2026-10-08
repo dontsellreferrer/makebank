@@ -839,9 +839,15 @@ function renderStatGrid() {
       <div class="stat-grid-inner">
         ${LB_TABS.map(tab => {
           const c = cache[tab.cat] || { agency: [], agent: [], total: 0 };
+          // Big number = total listings/sales; badge = how many agencies or
+          // agents they're spread across (changed 8 Oct 2026 — the big number
+          // used to be the agency/agent count, which read as e.g. "5 SALES"
+          // when there were actually 6 sales by 5 agencies).
+          const who = (c[lbView] || []).length;
+          const noun = lbView === 'agent' ? (who === 1 ? 'agent' : 'agents') : (who === 1 ? 'agency' : 'agencies');
           return `<div class="stat ${lbMetric === tab.key ? 'active' : ''}" id="hs-${tab.key}" onclick="selectLeaderboard('${tab.key}')">
-            <div class="stat-main"><span class="stat-num">${(c[lbView] || []).length}</span><span class="stat-lbl">${tab.label}</span></div>
-            <div class="stat-badge ${tab.badge}">${c.total || 0} total</div>
+            <div class="stat-main"><span class="stat-num">${c.total || 0}</span><span class="stat-lbl">${tab.label}</span></div>
+            <div class="stat-badge ${tab.badge}">by ${who} ${noun}</div>
           </div>`;
         }).join('')}
       </div>`;
