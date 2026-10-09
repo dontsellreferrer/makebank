@@ -25,6 +25,36 @@ from fetch_and_build_daily_email import (
 from build_daily_email import build_daily_email_html
 from ops_health import get_latest_runs, lga_problems
 import datetime as dt
+from zoneinfo import ZoneInfo
+
+# ── 7am report anchor (added 9 Oct 2026) ─────────────────────────────────────
+# The email covers the 24 hours to the most recent 7:00am Sydney, and the
+# dashboard's Daily view (anchorDaysBack/anchorDateStr in dashboard.html) uses
+# exactly the same window — so the numbers in the email match the dashboard
+# all day. Before this, the email used a UTC "now" (dated Friday's 7am email
+# "Thursday") and the dashboard a rolling 24h, so they never lined up.
+SYD = ZoneInfo("Australia/Sydney")
+REPORT_HOUR = 7
+
+
+def report_anchor(now: dt.datetime = None) -> dt.datetime:
+    """Most recent 7:00am Sydney at or before now (timezone-aware)."""
+    now = (now or dt.datetime.now(SYD)).astimezone(SYD)
+    anchor = now.replace(hour=REPORT_HOUR, minute=0, second=0, microsecond=0)
+    if anchor > now:
+        anchor = anchor - dt.timedelta(days=1)
+    return anchor
+
+
+def _days_back(anchor: dt.datetime, days: int) -> dt.datetime:
+    """Same Sydney wall-clock time, `days` calendar days earlier (DST-safe)."""
+    d = anchor.date() - dt.timedelta(days=days)
+    return dt.datetime(d.year, d.month, d.day, anchor.hour, tzinfo=SYD)
+
+
+def _z(t: dt.datetime) -> str:
+    """UTC timestamp for a query string ('Z' form — no '+' to get mangled)."""
+    return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 log = logging.getLogger("send_daily_emails")
 logging.basicConfig(level=logging.INFO)
@@ -70,22 +100,23 @@ def compute_counts(lga_id: int, ref: dt.datetime) -> dict:
     historical backlog of 90+ day listings, not just the ones that crossed
     90 days specifically in the last 24 hours, which is what the dashboard's
     own 'Newly Expired' actually means."""
-    yesterday = (ref - dt.timedelta(days=1)).isoformat()
-    yesterday_date = (ref - dt.timedelta(days=1)).date().isoformat()
-    days75 = (ref - dt.timedelta(days=75)).date().isoformat()
-    days90 = (ref - dt.timedelta(days=90)).date().isoformat()
+    # ref is the 7am Sydney anchor (report_anchor). Window = [7am yesterday, 7am today).
+    start, end = _z(_days_back(ref, 1)), _z(ref)
+    start_date, end_date = (ref.date() - dt.timedelta(days=1)).isoformat(), ref.date().isoformat()
+    days75 = (ref.date() - dt.timedelta(days=75)).isoformat()
+    days90 = (ref.date() - dt.timedelta(days=90)).isoformat()
     # Narrow ~24h band, matches dashboard.html's days90Start/days90End exactly
-    days90_start = (ref - dt.timedelta(days=91)).isoformat()
-    days90_end = (ref - dt.timedelta(days=90)).isoformat()
+    days90_start = _z(_days_back(ref, 91))
+    days90_end = _z(_days_back(ref, 90))
 
-    new_listing_rows = sb_rows("listings", f"lga_id=eq.{lga_id}&status=eq.active&first_seen=gte.{yesterday}&select=agency")
+    new_listing_rows = sb_rows("listings", f"lga_id=eq.{lga_id}&status=eq.active&first_seen=gte.{start}&first_seen=lt.{end}&select=agency")
     fsbo_count = sum(1 for r in new_listing_rows if is_fsbo(r.get("agency")))
     new_listings_count = len(new_listing_rows) - fsbo_count
 
     return {
         "new_listings": new_listings_count,
-        "new_sales": sb_count("sold", f"lga_id=eq.{lga_id}&sold_date=gte.{yesterday_date}&select=id"),
-        "hot_leads": sb_count("listings", f"lga_id=eq.{lga_id}&status=eq.removed_not_sold&removed_at=gte.{yesterday}&select=id"),
+        "new_sales": sb_count("sold", f"lga_id=eq.{lga_id}&sold_date=gte.{start_date}&sold_date=lt.{end_date}&select=id"),
+        "hot_leads": sb_count("listings", f"lga_id=eq.{lga_id}&status=eq.removed_not_sold&removed_at=gte.{start}&removed_at=lt.{end}&select=id"),
         "newly_expired": sb_count("listings", f"lga_id=eq.{lga_id}&status=eq.active&first_seen=gte.{days90_start}&first_seen=lt.{days90_end}&select=id"),
         "expiring_soon": sb_count("listings", f"lga_id=eq.{lga_id}&status=eq.active&first_seen=gte.{days90}&first_seen=lte.{days75}&select=id"),
         "new_fsbo": fsbo_count,
@@ -115,7 +146,7 @@ def send_for_lga(lga_id: int):
         log.info(f"No active free recipients for {lga['name']} (id={lga_id}) — nothing to send.")
         return
 
-    ref = dt.datetime.utcnow()
+    ref = report_anchor()
     counts = compute_counts(lga_id, ref)
     date_str = ref.strftime("%Y-%m-%d")
     display_date = ref.strftime("%A, %-d %B %Y")

@@ -323,10 +323,51 @@ function isoDate(daysAgo = 0) {
   d.setDate(d.getDate() - daysAgo);
   return d.toISOString().slice(0, 10);
 }
+// Sydney's UTC offset (minutes) at a given instant. Reads Sydney's wall-clock
+// parts directly (9 Oct 2026) — the old version parsed two locale strings in
+// the viewer's own timezone, which came out an hour wrong for the hours
+// either side of a daylight-saving changeover.
+const _SYD_PARTS = new Intl.DateTimeFormat('en-AU', {
+  timeZone: 'Australia/Sydney', hourCycle: 'h23',
+  year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+});
 function sydneyOffsetMinutes(date) {
-  const utc = new Date(date.toLocaleString('en-US', { timeZone: 'UTC' }));
-  const syd = new Date(date.toLocaleString('en-US', { timeZone: 'Australia/Sydney' }));
-  return (syd - utc) / 60000;
+  const p = {};
+  for (const part of _SYD_PARTS.formatToParts(date)) p[part.type] = part.value;
+  const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+  return Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);
+}
+
+// ── 7AM REPORT ANCHOR (added 9 Oct 2026) ─────────────────────────────────────
+// The Daily view and the daily snapshot bands (Expiring Soon, Newly Expired)
+// are pinned to the most recent 7:00am Sydney — the same moment the 7am email
+// is built — so the email and the dashboard show identical numbers all day.
+// Mirrors report_anchor() in send_daily_emails.py; keep the two in step.
+const REPORT_HOUR = 7;
+function sydWallToUtc(y, m, d, h) {
+  // Sydney wall-clock time -> real instant (handles the DST changeover).
+  const guess = Date.UTC(y, m, d, h);
+  const off1 = sydneyOffsetMinutes(new Date(guess));
+  const off2 = sydneyOffsetMinutes(new Date(guess - off1 * 60000));
+  return new Date(guess - off2 * 60000);
+}
+function reportAnchorDay() {
+  const now = new Date();
+  const syd = new Date(now.getTime() + sydneyOffsetMinutes(now) * 60000);
+  let y = syd.getUTCFullYear(), m = syd.getUTCMonth(), d = syd.getUTCDate();
+  if (syd.getUTCHours() < REPORT_HOUR) d -= 1;   // before 7am -> yesterday's report
+  return { y, m, d };
+}
+function anchorDaysBack(n) {          // 7:00am Sydney, n days before the current report
+  const { y, m, d } = reportAnchorDay();
+  return sydWallToUtc(y, m, d - n, REPORT_HOUR);
+}
+function anchorDateStr(n) {           // Sydney calendar date, n days before the report date
+  const { y, m, d } = reportAnchorDay();
+  return new Date(Date.UTC(y, m, d - n)).toISOString().slice(0, 10);
+}
+function toSydDateStr(date) {         // Sydney calendar date of an instant (YYYY-MM-DD)
+  return new Date(date.getTime() + sydneyOffsetMinutes(date) * 60000).toISOString().slice(0, 10);
 }
 
 function thisWeekBounds() {
@@ -372,7 +413,7 @@ function getWindowBounds(win) {
   const { monthStart: lastMonthStart, monthEnd: lastMonthEnd } = lastMonthBounds();
 
   switch (win) {
-    case 'daily':      return { start: new Date(now.getTime() - 24*60*60*1000), end: now };
+    case 'daily':      return { start: anchorDaysBack(1), end: anchorDaysBack(0) };  // 7am yesterday -> 7am today, same as the email
     case 'wtd':        return { start: weekStart,     end: now };
     case 'last_week':  return { start: lastWeekStart, end: weekStart };
     case 'mtd':        return { start: monthStart,    end: now };
@@ -479,10 +520,9 @@ function tallyAgent(rows) {
 
 // ── WINDOW LABELS ─────────────────────────────────────────────────────────────
 function windowLabel(win) {
-  // 'daily' is a rolling 24-hour window (see getWindowBounds), not since-
-  // midnight — "Past 24 Hours" says that accurately; "Today" implied a
-  // calendar boundary that isn't what's actually being measured.
-  return { daily: 'Past 24 Hours', wtd: 'Week to Date', last_week: 'Last Week', mtd: 'Month to Date', last_month: 'Last Month' }[win];
+  // 'daily' is the 24 hours to the most recent 7am Sydney (see
+  // getWindowBounds) — the same window as the 7am email.
+  return { daily: '24 Hours to 7am', wtd: 'Week to Date', last_week: 'Last Week', mtd: 'Month to Date', last_month: 'Last Month' }[win];
 }
 function heroTitle(win) {
   return {
@@ -636,16 +676,16 @@ function renderContent() {
   const HOTLIST_TABS = [
     { key: 'rns',      label: `Removed – Not Sold (${windowLabel(currentWindow)})` },
     { key: 'expiring', label: 'Expiring Soon (75–90 Days)' },
-    { key: 'expired',  label: currentWindow === 'daily' ? 'Newly Expired (Crossed 91 Days in Past 24h)' : 'Expired (91+ Days)' },
+    { key: 'expired',  label: currentWindow === 'daily' ? 'Newly Expired (Crossed 91 Days, 24h to 7am)' : 'Expired (91+ Days)' },
     { key: 'fsbo',     label: 'Private Sales' },
   ];
 
   if (mainTab === 'hotlists') {
     const expiredData = currentWindow === 'daily' ? (SNAPSHOT.expiredToday || []) : (SNAPSHOT.expiredAll || []);
     const map = {
-      rns:      { data: cache.rns || [],              dot: 'red',   pills: () => pill('Withdrawn', 'red') + pill('Call Owner', 'orange'), empty: currentWindow === 'daily' ? 'Nothing withdrawn in the past 24 hours — clean sheet.' : `Nothing withdrawn ${windowLabel(currentWindow).toLowerCase()} — clean sheet.` },
+      rns:      { data: cache.rns || [],              dot: 'red',   pills: () => pill('Withdrawn', 'red') + pill('Call Owner', 'orange'), empty: currentWindow === 'daily' ? 'Nothing withdrawn in the 24 hours to 7am — clean sheet.' : `Nothing withdrawn ${windowLabel(currentWindow).toLowerCase()} — clean sheet.` },
       expiring: { data: SNAPSHOT.expiringSoon || [],   dot: 'amber', pills: (l) => pill(dom(l.first_seen) + ' days', 'amber') + pill('Call before expiry', 'orange'), empty: 'No listings approaching 90 days.' },
-      expired:  { data: expiredData,                   dot: 'amber', pills: (l) => pill(dom(l.first_seen) + ' days on market', 'amber') + pill('Agreement likely expired', 'red'), empty: currentWindow === 'daily' ? 'Nothing crossed 91 days in the past 24 hours.' : 'No expired listings.' },
+      expired:  { data: expiredData,                   dot: 'amber', pills: (l) => pill(dom(l.first_seen) + ' days on market', 'amber') + pill('Agreement likely expired', 'red'), empty: currentWindow === 'daily' ? 'Nothing crossed 91 days in the 24 hours to 7am.' : 'No expired listings.' },
       fsbo:     { data: SNAPSHOT.fsboAll || [],        dot: 'navy',  pills: (l) => pill('Private Sale', 'navy') + fsboDatePill(l.first_seen), empty: 'No active private listings.' },
     }[hotlistSel];
     const tab = HOTLIST_TABS.find(t => t.key === hotlistSel);
@@ -710,8 +750,8 @@ async function fetchWindowData(win) {
   const { start, end } = getWindowBounds(win);
   const startISO = start.toISOString();
   const endISO = end.toISOString();
-  const startDate = startISO.slice(0, 10);
-  const endDate = endISO.slice(0, 10);
+  const startDate = toSydDateStr(start);
+  const endDate = toSydDateStr(end);
 
   // listed/sold each fetch full rows (address, url included) in one query now
   // instead of two agency-only/agent-only selects — the tallies are derived
@@ -790,7 +830,7 @@ function renderHero(data) {
   // title already ends in the connector word "in" — "This week so far, in
   // Wollongong" wants a space there, not a second comma.
   document.getElementById('hero-title-sep').textContent = currentWindow === 'daily' ? ', ' : ' ';
-  const rnsLabel = { daily: 'withdrawn and still unsold in the past 24 hours', wtd: 'withdrawn and still unsold this week so far', last_week: 'withdrawn and still unsold last week', mtd: 'withdrawn and still unsold this month so far', last_month: 'withdrawn and still unsold last month' }[currentWindow];
+  const rnsLabel = { daily: 'withdrawn and still unsold in the 24 hours to 7am', wtd: 'withdrawn and still unsold this week so far', last_week: 'withdrawn and still unsold last week', mtd: 'withdrawn and still unsold this month so far', last_month: 'withdrawn and still unsold last month' }[currentWindow];
   document.getElementById('hero-sub').textContent = `${data.rns.length} ${rnsLabel} — ${CONFIG.lgaName}`;
 
   const { start, end } = getWindowBounds(currentWindow);
@@ -866,7 +906,7 @@ function renderStatGrid() {
     </div>
     <div class="stat ${hotlistSel === 'expired' ? 'active' : ''}" id="hs-expired" onclick="selectHotlist('expired')">
       <div class="stat-main"><span class="stat-num">${expiredData.length}</span><span class="stat-lbl">${currentWindow === 'daily' ? 'Newly Expired' : 'Expired'}</span></div>
-      <div class="stat-badge badge-amber">${currentWindow === 'daily' ? '91 Days, Past 24h' : '91+ Days, All'}</div>
+      <div class="stat-badge badge-amber">${currentWindow === 'daily' ? '91 Days, 24h to 7am' : '91+ Days, All'}</div>
     </div>
     <div class="stat ${hotlistSel === 'fsbo' ? 'active' : ''}" id="hs-fsbo" onclick="selectHotlist('fsbo')">
       <div class="stat-main"><span class="stat-num">${(SNAPSHOT.fsboAll || []).length}</span><span class="stat-lbl">FSBO</span></div>
@@ -974,13 +1014,13 @@ function renderShellAndContent() {
 // The dashboard only reads status; it does not perform the reconciliation UPDATE.
 async function load() {
   const lga = CONFIG.lgaId;
-  const days75 = isoDate(75);
-  const days90 = isoDate(90);
+  const days75 = anchorDateStr(75);
+  const days90 = anchorDateStr(90);
   // "Crossed 91 days today" — first_seen fell in the single 24h band that
   // puts a listing at exactly 90 days old right now, i.e. it became
   // Newly Expired within the last 24 hours specifically (Daily-only view).
-  const days90Start = new Date(Date.now() - 91 * 86400000).toISOString();
-  const days90End   = new Date(Date.now() - 90 * 86400000).toISOString();
+  const days90Start = anchorDaysBack(91).toISOString();
+  const days90End   = anchorDaysBack(90).toISOString();
   const fsboOr = 'or=(' + FSBO_KEYWORDS.map(k => `agency.ilike.*${encodeURIComponent(k)}*`).join(',') + ')';
 
   document.getElementById('nav-date').textContent = fmtDate(new Date());
