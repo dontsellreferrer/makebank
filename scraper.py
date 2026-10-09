@@ -1373,14 +1373,29 @@ def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]]
     the cron's own window. Concurrent groups is what actually fixes that,
     not staggering across separate cron times — the total volume here is
     small enough that simple concurrency is sufficient on its own."""
-    query = sb.table('pending_scrape_urls').select('*')
-    if lga_ids:
-        query = query.in_('lga_id', lga_ids)
-    if run_type:
-        query = query.eq('run_type', run_type)
-    if batch_limit:
-        query = query.limit(batch_limit)
-    pending = query.execute().data
+    # Paged read (fix, 9 Oct 2026): a single select is capped at 1,000 rows by
+    # Supabase, so Phase 2 silently processed at most 1,000 queued URLs per
+    # run and left the rest for the next night (found when 1,645 were still
+    # queued after a "complete" run). Read in pages of 1,000 until done.
+    def _base_query():
+        q = sb.table('pending_scrape_urls').select('*')
+        if lga_ids:
+            q = q.in_('lga_id', lga_ids)
+        if run_type:
+            q = q.eq('run_type', run_type)
+        return q.order('id')
+
+    pending = []
+    page_size = 1000
+    while True:
+        want = page_size if not batch_limit else min(page_size, batch_limit - len(pending))
+        if want <= 0:
+            break
+        chunk = _base_query().range(len(pending), len(pending) + want - 1).execute().data
+        pending.extend(chunk)
+        if len(chunk) < want:
+            break
+    log.info(f"Phase 2: {len(pending)} queued URL(s) to process")
 
     # Fix A (phase2_report_gaps_diagnosis, 27 Sep 2026): a region/type with
     # nothing queued by phase 1 used to be silently skipped below -- no
@@ -1435,6 +1450,16 @@ def run_scrape_phase2(sb: Client, pool: CookiePool, lga_ids: Optional[list[int]]
 
         try:
             details = scrape_details_playwright(urls, pool, lga_id=lga_id, stats=detail_stats)
+            # first_seen = when Phase 1 first queued the URL, not when Phase 2
+            # got round to it (fix, 9 Oct 2026). Otherwise a listing that waited
+            # a night or two in the queue (failed Phase 2, 1,000-row cap) was
+            # stamped days late and showed as "new" on the wrong day. Re-queueing
+            # an already-queued URL doesn't touch created_at, so this is always
+            # the earliest sighting.
+            queued_at = {r['url']: r.get('created_at') for r in rows}
+            for d in details:
+                if not d.get('first_seen') and queued_at.get(d.get('url')):
+                    d['first_seen'] = queued_at[d['url']]
             inserted = store.insert_new(table, details)
             log.info(f"Inserted {inserted} rows")
 

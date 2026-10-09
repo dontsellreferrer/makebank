@@ -54,6 +54,39 @@ def sb_get(table: str, params: dict) -> list[dict]:
     return r.json()
 
 
+def get_pending_counts() -> dict | None:
+    """URLs still waiting in pending_scrape_urls, by run type. Should be 0 every
+    morning — anything left means Phase 2 didn't finish its queue (added 9 Oct
+    2026 after Phase 2 was found silently stopping at 1,000 rows a night).
+    None if the count couldn't be read."""
+    counts = {}
+    try:
+        for run_type in ("listings", "sold"):
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/pending_scrape_urls",
+                params={"run_type": f"eq.{run_type}", "select": "id"},
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                         "Prefer": "count=exact", "Range": "0-0"},
+            )
+            r.raise_for_status()
+            counts[run_type] = int(r.headers.get("Content-Range", "*/0").split("/")[-1])
+    except Exception as e:
+        log.error(f"Couldn't read pending queue: {e}")
+        return None
+    return counts
+
+
+def build_queue_section(counts: dict | None) -> str:
+    title = f'<div style="font-family:{FONT};font-size:11px;font-weight:700;color:#9a9a9a;text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 8px;">Phase 2 queue left over</div>'
+    if counts is None:
+        return title + f'<div style="font-family:{FONT};font-size:13px;color:{RED};font-weight:600;">Couldn&rsquo;t read the queue — check pending_scrape_urls.</div>'
+    total = sum(counts.values())
+    if total == 0:
+        return title + f'<div style="font-family:{FONT};font-size:13px;color:{GREEN};font-weight:600;">&#10003; Empty — Phase 2 finished everything Phase 1 queued.</div>'
+    detail = ", ".join(f"{n} {t}" for t, n in counts.items() if n)
+    return title + f'<div style="font-family:{FONT};font-size:13px;color:{RED};font-weight:600;">&#10007; {total} URL(s) still queued ({detail}) — Phase 2 didn&rsquo;t finish. These listings/sales are missing from dashboards until it does.</div>'
+
+
 def get_active_lgas() -> list[dict]:
     return sb_get("lgas", {"active": "eq.true", "dated": "eq.true", "select": "id,name", "order": "name.asc"})
 
@@ -153,7 +186,7 @@ def build_burns_section(burn_runs: list[dict] | None, names: dict) -> str:
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0">{rows}</table>'''
 
 
-def build_email_html(results: list[dict], hydration_section: str = "", burns_section: str = "") -> str:
+def build_email_html(results: list[dict], hydration_section: str = "", burns_section: str = "", queue_section: str = "") -> str:
     failed = [r for r in results if not r["ok"]]
     ok = [r for r in results if r["ok"]]
 
@@ -214,6 +247,7 @@ def build_email_html(results: list[dict], hydration_section: str = "", burns_sec
   </td></tr>
   <tr><td style="background:#ffffff;border-radius:0 0 14px 14px;padding:8px 28px 28px;">
     {failed_section}
+    {queue_section}
     {ok_section}
     {hydration_section}
     {burns_section}
@@ -254,17 +288,24 @@ def main():
     names = get_lga_names({h["lga_id"] for h in hydrations} | {r["lga_id"] for r in (burn_runs or [])})
     hydration_failed = sum(1 for h in hydrations if h["status"] != "ok")
     total_burns = sum(r["burns"] for r in (burn_runs or []))
+    pending = get_pending_counts()
+    pending_total = sum(pending.values()) if pending else 0
 
     problems = []
     if failed_count:
         problems.append(f"{failed_count} region(s) failed")
     if hydration_failed:
         problems.append(f"{hydration_failed} hydration(s) failed")
+    if pending is None:
+        problems.append("queue unreadable")
+    elif pending_total:
+        problems.append(f"{pending_total} URL(s) still queued")
     subject = "MakeBank ops: " + (", ".join(problems) if problems else "all clear") + " last night"
     if total_burns:
         subject += f" · {total_burns} cookie burn(s)"
 
-    html_body = build_email_html(results, build_hydration_section(hydrations, names), build_burns_section(burn_runs, names))
+    html_body = build_email_html(results, build_hydration_section(hydrations, names),
+                                 build_burns_section(burn_runs, names), build_queue_section(pending))
     send_email(html_body, subject)
 
 
