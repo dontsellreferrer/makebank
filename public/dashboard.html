@@ -529,11 +529,21 @@ function listedPills(firstSeen) {
 }
 // Listed / sold / days-to-sell pills for a sale (10 Oct 2026). Past the
 // ~90-day dating range the listed date isn't real, so it's dropped.
+// Whole Sydney calendar days from first seen to sold (10 Oct 2026). sold_date
+// is a plain date, first_seen a timestamp — subtracting them directly made a
+// same-day sale come out as -1. null if either is missing; negative means the
+// listing was first seen AFTER its sale date (a late detection), which is not
+// a real days-to-sell figure.
+function daysToSellOf(l) {
+  if (!l.first_seen || !l.sold_date) return null;
+  const listed = toSydDateStr(new Date(l.first_seen));
+  return Math.round((Date.parse(String(l.sold_date).slice(0, 10)) - Date.parse(listed)) / 86400000);
+}
 function salePills(l) {
   if (!l.sold_date) return '';
   const soldPill = pill('Sold ' + fmtShort(l.sold_date), 'green');
-  if (!l.first_seen) return soldPill;
-  const daysToSell = Math.floor((new Date(l.sold_date) - new Date(l.first_seen)) / 86400000);
+  const daysToSell = daysToSellOf(l);
+  if (daysToSell === null) return soldPill;
   if (daysToSell > 90) return soldPill + pill('Over 90 days to sell', 'green');
   if (daysToSell >= 0) return pill('Listed ' + fmtShort(l.first_seen), 'blue') + soldPill + pill(`${daysToSell} ${daysToSell === 1 ? 'day' : 'days'} to sell`, 'green');
   return soldPill;
@@ -830,9 +840,13 @@ async function fetchWindowData(win) {
     sbAll('listings', `lga_id=eq.${lga}&status=eq.sold&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=agent,agency,address,url,first_seen,sold_date,off_market&order=id.asc`),
   ]);
 
-  const fastSaleRows = soldListingsRows.data.filter(r =>
-    r.first_seen && r.sold_date && (new Date(r.sold_date) - new Date(r.first_seen)) / 86400000 <= 7
-  );
+  // Fast sale = sold within 7 days of first being seen. A negative gap (first
+  // seen after the sale date) is a late detection, not a fast sale, so it's
+  // excluded (10 Oct 2026 — those were counted before, with no listed date).
+  const fastSaleRows = soldListingsRows.data.filter(r => {
+    const d = daysToSellOf(r);
+    return d !== null && d >= 0 && d <= 7;
+  });
   const offMarketRows = soldListingsRows.data.filter(r => r.off_market);
 
   const result = {
