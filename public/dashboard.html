@@ -308,6 +308,36 @@ async function sb(table, params = '') {
   return { data, count: count ? parseInt(count) : (Array.isArray(data) ? data.length : 0) };
 }
 
+// Every row, not just the first 1,000 (added 10 Oct 2026). Supabase caps a
+// single request at 1,000 rows, so Total Active (and the Active Agencies /
+// Agents directory built from it), Expired, and month-level leaderboards were
+// silently truncated in bigger regions. Pages through with Range headers.
+// Needs an order= in params so pages are stable.
+async function sbAll(table, params = '') {
+  const PAGE = 1000;
+  let all = [], total = null;
+  for (let from = 0; from < 100000; from += PAGE) {
+    const r = await fetch(`${CONFIG.supabaseUrl}/rest/v1/${table}?${params}`, {
+      headers: {
+        'apikey': CONFIG.supabaseKey,
+        'Authorization': `Bearer ${CONFIG.supabaseKey}`,
+        'Prefer': 'count=exact',
+        'Range-Unit': 'items',
+        'Range': `${from}-${from + PAGE - 1}`,
+      }
+    });
+    const page = await r.json();
+    if (!Array.isArray(page)) return { data: [], count: 0 };
+    if (total === null) {
+      const c = r.headers.get('content-range')?.split('/')[1];
+      total = c && c !== '*' ? parseInt(c) : null;
+    }
+    all = all.concat(page);
+    if (page.length < PAGE || (total !== null && all.length >= total)) break;
+  }
+  return { data: all, count: total ?? all.length };
+}
+
 // ── FSBO DETECTION ────────────────────────────────────────────────────────────
 const FSBO_KEYWORDS = ['property now', 'buymyplace', 'for sale by owner', 'no agent property', 'sold by owner', 'private sale'];
 function isFSBO(agency) {
@@ -488,6 +518,30 @@ function dom(firstSeen) {
 // across many unrelated rows) — past that threshold, show "90+ days" instead
 // of the fabricated date. Inside 90 days the date is real (either an exact
 // "Added X days ago" badge or a reasonably-close checkpoint estimate).
+// Listed date + days on market for active listings (added 10 Oct 2026).
+// Dating only goes back ~90 days (older listings share the CSV tail stamp),
+// so anything past 90 days shows "Over 90 days" rather than a fake count.
+function listedPills(firstSeen) {
+  if (!firstSeen) return '';
+  const days = dom(firstSeen);
+  return days > 90 ? pill('Over 90 days', 'amber')
+                   : pill('Listed ' + fmtShort(firstSeen), 'blue') + pill(`${days} ${days === 1 ? 'day' : 'days'} on market`, 'amber');
+}
+// Listed / sold / days-to-sell pills for a sale (10 Oct 2026). Past the
+// ~90-day dating range the listed date isn't real, so it's dropped.
+function salePills(l) {
+  if (!l.sold_date) return '';
+  const soldPill = pill('Sold ' + fmtShort(l.sold_date), 'green');
+  if (!l.first_seen) return soldPill;
+  const daysToSell = Math.floor((new Date(l.sold_date) - new Date(l.first_seen)) / 86400000);
+  if (daysToSell > 90) return soldPill + pill('Over 90 days to sell', 'green');
+  if (daysToSell >= 0) return pill('Listed ' + fmtShort(l.first_seen), 'blue') + soldPill + pill(`${daysToSell} ${daysToSell === 1 ? 'day' : 'days'} to sell`, 'green');
+  return soldPill;
+}
+// Newest first — the order we scrape in. Sold lists sort by sale date.
+function newestFirst(rows, field) {
+  return [...rows].sort((a, b) => new Date(b[field] || 0) - new Date(a[field] || 0));
+}
 function fsboDatePill(firstSeen) {
   if (!firstSeen) return '';
   const days = dom(firstSeen);
@@ -522,7 +576,7 @@ function tallyAgent(rows) {
 function windowLabel(win) {
   // 'daily' is the 24 hours to the most recent 7am Sydney (see
   // getWindowBounds) — the same window as the 7am email.
-  return { daily: '24 Hours to 7am', wtd: 'Week to Date', last_week: 'Last Week', mtd: 'Month to Date', last_month: 'Last Month' }[win];
+  return { daily: 'Past 24 Hours', wtd: 'Week to Date', last_week: 'Last Week', mtd: 'Month to Date', last_month: 'Last Month' }[win];
 }
 function heroTitle(win) {
   return {
@@ -590,12 +644,15 @@ function selectLeaderboard(key) {
 }
 function setLbView(view) {
   lbView = view;
+  if (directoryView) directoryView = view;   // toggle also flips an open Active Agencies/Agents list
   renderStatGrid();
   renderContent();
 }
 function showDirectory(kind) {
   directoryView = kind;
   statView = null;
+  lbView = kind;          // keep the Agency/Agent toggle in step (10 Oct 2026)
+  renderStatGrid();
   renderContent();
 }
 function showStatList(kind) {
@@ -620,9 +677,10 @@ function renderContent() {
 
   if (statView) {
     const kind = statView;
-    const rows = kind === 'total_active' ? (SNAPSHOT.totalActiveRows || [])
-               : kind === 'listed'       ? (cache.listed?.rows || [])
-               :                            (cache.sold?.rows || []);
+    const rawRows = kind === 'total_active' ? (SNAPSHOT.totalActiveRows || [])
+                  : kind === 'listed'       ? (cache.listed?.rows || [])
+                  :                            (cache.sold?.rows || []);
+    const rows = newestFirst(rawRows, kind === 'sold' ? 'sold_date' : 'first_seen');
     const title = kind === 'total_active' ? 'Total Active'
                 : kind === 'listed'       ? `Listed — ${windowLabel(currentWindow)}`
                 :                            `Sold — ${windowLabel(currentWindow)}`;
@@ -635,11 +693,10 @@ function renderContent() {
       ? `<div class="sec-empty">None right now.</div>`
       : rows.map((l, i) => {
           let pills = '';
-          if (kind === 'sold' && l.first_seen && l.sold_date) {
-            const daysToSell = Math.floor((new Date(l.sold_date) - new Date(l.first_seen)) / 86400000);
-            if (daysToSell >= 0) pills = pill(`${daysToSell} days to sell`, 'green');
+          if (kind === 'sold') {
+            pills = salePills(l);
           } else if (l.first_seen) {
-            pills = pill(`${dom(l.first_seen)} days on market`, 'amber');
+            pills = listedPills(l.first_seen);
           }
           return rowHtml(l, i, pills);
         }).join('');
@@ -676,16 +733,16 @@ function renderContent() {
   const HOTLIST_TABS = [
     { key: 'rns',      label: `Removed – Not Sold (${windowLabel(currentWindow)})` },
     { key: 'expiring', label: 'Expiring Soon (75–90 Days)' },
-    { key: 'expired',  label: currentWindow === 'daily' ? 'Newly Expired (Crossed 91 Days, 24h to 7am)' : 'Expired (91+ Days)' },
+    { key: 'expired',  label: currentWindow === 'daily' ? 'Newly Expired (Crossed 91 Days in Past 24h)' : 'Expired (91+ Days)' },
     { key: 'fsbo',     label: 'Private Sales' },
   ];
 
   if (mainTab === 'hotlists') {
     const expiredData = currentWindow === 'daily' ? (SNAPSHOT.expiredToday || []) : (SNAPSHOT.expiredAll || []);
     const map = {
-      rns:      { data: cache.rns || [],              dot: 'red',   pills: () => pill('Withdrawn', 'red') + pill('Call Owner', 'orange'), empty: currentWindow === 'daily' ? 'Nothing withdrawn in the 24 hours to 7am — clean sheet.' : `Nothing withdrawn ${windowLabel(currentWindow).toLowerCase()} — clean sheet.` },
-      expiring: { data: SNAPSHOT.expiringSoon || [],   dot: 'amber', pills: (l) => pill(dom(l.first_seen) + ' days', 'amber') + pill('Call before expiry', 'orange'), empty: 'No listings approaching 90 days.' },
-      expired:  { data: expiredData,                   dot: 'amber', pills: (l) => pill(dom(l.first_seen) + ' days on market', 'amber') + pill('Agreement likely expired', 'red'), empty: currentWindow === 'daily' ? 'Nothing crossed 91 days in the 24 hours to 7am.' : 'No expired listings.' },
+      rns:      { data: cache.rns || [],              dot: 'red',   pills: (l) => fsboDatePill(l.first_seen) + pill(l.removed_at ? 'Withdrawn ' + fmtShort(l.removed_at) : 'Withdrawn', 'red') + pill('Call Owner', 'orange'), empty: currentWindow === 'daily' ? 'Nothing withdrawn in the past 24 hours — clean sheet.' : `Nothing withdrawn ${windowLabel(currentWindow).toLowerCase()} — clean sheet.` },
+      expiring: { data: SNAPSHOT.expiringSoon || [],   dot: 'amber', pills: (l) => listedPills(l.first_seen) + pill('Call before expiry', 'orange'), empty: 'No listings approaching 90 days.' },
+      expired:  { data: expiredData,                   dot: 'amber', pills: (l) => listedPills(l.first_seen) + pill('Agreement likely expired', 'red'), empty: currentWindow === 'daily' ? 'Nothing crossed 91 days in the past 24 hours.' : 'No expired listings.' },
       fsbo:     { data: SNAPSHOT.fsboAll || [],        dot: 'navy',  pills: (l) => pill('Private Sale', 'navy') + fsboDatePill(l.first_seen), empty: 'No active private listings.' },
     }[hotlistSel];
     const tab = HOTLIST_TABS.find(t => t.key === hotlistSel);
@@ -765,12 +822,12 @@ async function fetchWindowData(win) {
   // days-on-market is accurate. off_market is only ever true on rows the
   // reconcile backfill created (see scraper.py).
   const [rns, listedRows, listedCount, soldRows, soldCount, soldListingsRows] = await Promise.all([
-    sb('listings', `lga_id=eq.${lga}&status=eq.removed_not_sold&removed_at=gte.${startISO}&removed_at=lt.${endISO}&select=address,agent,agency,url,removed_at&order=removed_at.desc&limit=200`),
-    sb('listings', `lga_id=eq.${lga}&first_seen=gte.${startISO}&first_seen=lt.${endISO}&select=agent,agency,address,url,first_seen&order=agent.asc&limit=5000`),
+    sbAll('listings', `lga_id=eq.${lga}&status=eq.removed_not_sold&removed_at=gte.${startISO}&removed_at=lt.${endISO}&select=address,agent,agency,url,first_seen,removed_at&order=removed_at.desc,id.asc`),
+    sbAll('listings', `lga_id=eq.${lga}&first_seen=gte.${startISO}&first_seen=lt.${endISO}&select=agent,agency,address,url,first_seen&order=agent.asc,id.asc`),
     sb('listings', `lga_id=eq.${lga}&first_seen=gte.${startISO}&first_seen=lt.${endISO}&select=id`),
-    sb('sold', `lga_id=eq.${lga}&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=agent,agency,address,url,first_seen,sold_date&order=agent.asc&limit=5000`),
+    sbAll('sold', `lga_id=eq.${lga}&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=agent,agency,address,url,first_seen,sold_date&order=agent.asc,id.asc`),
     sb('sold', `lga_id=eq.${lga}&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=id`),
-    sb('listings', `lga_id=eq.${lga}&status=eq.sold&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=agent,agency,address,url,first_seen,sold_date,off_market&limit=5000`),
+    sbAll('listings', `lga_id=eq.${lga}&status=eq.sold&sold_date=gte.${startDate}&sold_date=lt.${endDate}&select=agent,agency,address,url,first_seen,sold_date,off_market&order=id.asc`),
   ]);
 
   const fastSaleRows = soldListingsRows.data.filter(r =>
@@ -830,7 +887,7 @@ function renderHero(data) {
   // title already ends in the connector word "in" — "This week so far, in
   // Wollongong" wants a space there, not a second comma.
   document.getElementById('hero-title-sep').textContent = currentWindow === 'daily' ? ', ' : ' ';
-  const rnsLabel = { daily: 'withdrawn and still unsold in the 24 hours to 7am', wtd: 'withdrawn and still unsold this week so far', last_week: 'withdrawn and still unsold last week', mtd: 'withdrawn and still unsold this month so far', last_month: 'withdrawn and still unsold last month' }[currentWindow];
+  const rnsLabel = { daily: 'withdrawn and still unsold in the past 24 hours', wtd: 'withdrawn and still unsold this week so far', last_week: 'withdrawn and still unsold last week', mtd: 'withdrawn and still unsold this month so far', last_month: 'withdrawn and still unsold last month' }[currentWindow];
   document.getElementById('hero-sub').textContent = `${data.rns.length} ${rnsLabel} — ${CONFIG.lgaName}`;
 
   const { start, end } = getWindowBounds(currentWindow);
@@ -906,7 +963,7 @@ function renderStatGrid() {
     </div>
     <div class="stat ${hotlistSel === 'expired' ? 'active' : ''}" id="hs-expired" onclick="selectHotlist('expired')">
       <div class="stat-main"><span class="stat-num">${expiredData.length}</span><span class="stat-lbl">${currentWindow === 'daily' ? 'Newly Expired' : 'Expired'}</span></div>
-      <div class="stat-badge badge-amber">${currentWindow === 'daily' ? '91 Days, 24h to 7am' : '91+ Days, All'}</div>
+      <div class="stat-badge badge-amber">${currentWindow === 'daily' ? '91 Days, Past 24h' : '91+ Days, All'}</div>
     </div>
     <div class="stat ${hotlistSel === 'fsbo' ? 'active' : ''}" id="hs-fsbo" onclick="selectHotlist('fsbo')">
       <div class="stat-main"><span class="stat-num">${(SNAPSHOT.fsboAll || []).length}</span><span class="stat-lbl">FSBO</span></div>
@@ -1029,11 +1086,11 @@ async function load() {
 
   const [lgaInfo, expiringSoon, expiredAll, expiredToday, fsboAll, totalActiveRows, totalActiveCount] = await Promise.all([
     sb('lgas', `id=eq.${lga}&select=created_at,search_url_listings&limit=1`),
-    sb('listings', `lga_id=eq.${lga}&status=eq.active&first_seen=gte.${days90}&first_seen=lte.${days75}&select=address,agent,agency,url,first_seen&order=first_seen.asc&limit=500`),
-    sb('listings', `lga_id=eq.${lga}&status=eq.active&first_seen=lte.${days90}&select=address,agent,agency,url,first_seen&order=first_seen.asc&limit=500`),
-    sb('listings', `lga_id=eq.${lga}&status=eq.active&first_seen=gte.${days90Start}&first_seen=lt.${days90End}&select=address,agent,agency,url,first_seen&order=first_seen.asc&limit=500`),
-    sb('listings', `lga_id=eq.${lga}&status=eq.active&${fsboOr}&select=address,agent,agency,url,first_seen&order=first_seen.desc&limit=500`),
-    sb('listings', `lga_id=eq.${lga}&status=eq.active&select=address,agent,agency,url,first_seen&order=agent.asc&limit=5000`),
+    sbAll('listings', `lga_id=eq.${lga}&status=eq.active&first_seen=gte.${days90}&first_seen=lte.${days75}&select=address,agent,agency,url,first_seen&order=first_seen.asc,id.asc`),
+    sbAll('listings', `lga_id=eq.${lga}&status=eq.active&first_seen=lte.${days90}&select=address,agent,agency,url,first_seen&order=first_seen.asc,id.asc`),
+    sbAll('listings', `lga_id=eq.${lga}&status=eq.active&first_seen=gte.${days90Start}&first_seen=lt.${days90End}&select=address,agent,agency,url,first_seen&order=first_seen.asc,id.asc`),
+    sbAll('listings', `lga_id=eq.${lga}&status=eq.active&${fsboOr}&select=address,agent,agency,url,first_seen&order=first_seen.desc,id.asc`),
+    sbAll('listings', `lga_id=eq.${lga}&status=eq.active&select=address,agent,agency,url,first_seen&order=agent.asc,id.asc`),
     sb('listings', `lga_id=eq.${lga}&status=eq.active&select=id`),
   ]);
 
@@ -1107,9 +1164,20 @@ function toggleLbRow(i) {
   const labels = { listed: 'Listed', sold: 'Sold', fastSales: 'Fast Sales', offMarket: 'Off-Market Sales' };
   const label = labels[cat];
 
+  // Date pills (10 Oct 2026): listings get listed date + days on market;
+  // sales and fast sales get listed / sold / days to sell. Off-market sales
+  // never appeared as a listing, so they stay plain. Newest first.
+  const pillsFor = cat === 'listed' ? (l) => listedPills(l.first_seen)
+                 : (cat === 'sold' || cat === 'fastSales') ? salePills
+                 : () => '';
+  const ordered = cat === 'offMarket' ? listings : newestFirst(listings, cat === 'listed' ? 'first_seen' : 'sold_date');
+
   el.innerHTML = `
     <div class="dir-listings-title">${label} (${listings.length})</div>
-    ${listings.map(l => `<a class="dir-listing-link" href="${l.url || '#'}" target="_blank">${l.address || l.url || 'Listing'}</a>`).join('')}
+    ${ordered.map(l => {
+      const pills = pillsFor(l);
+      return `<a class="dir-listing-link" href="${l.url || '#'}" target="_blank">${l.address || l.url || 'Listing'}${pills ? `<span class="dir-listing-pills" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;">${pills}</span>` : ''}</a>`;
+    }).join('')}
   `;
   el.classList.add('show');
 }
@@ -1140,8 +1208,10 @@ function downloadCSV() {
     const sRows = kind === 'total_active' ? (SNAPSHOT.totalActiveRows || [])
                 : kind === 'listed'       ? (cache.listed?.rows || [])
                 :                            (cache.sold?.rows || []);
-    headers = ['Address', 'Agent', 'Agency', 'URL'];
-    rows = sRows.map(l => [l.address, l.agent, l.agency, l.url]);
+    const field = kind === 'sold' ? 'sold_date' : 'first_seen';
+    headers = ['Address', 'Agent', 'Agency', kind === 'sold' ? 'Sold' : 'Listed', 'URL'];
+    rows = newestFirst(sRows, field).map(l => [l.address, l.agent, l.agency,
+      l[field] ? (kind === 'sold' ? String(l[field]).slice(0, 10) : (dom(l[field]) > 90 ? 'Over 90 days' : toSydDateStr(new Date(l[field])))) : '', l.url]);
     label = kind === 'total_active' ? 'total_active' : `${kind}_${currentWindow}`;
   } else if (directoryView) {
     const kind = directoryView;
@@ -1155,8 +1225,14 @@ function downloadCSV() {
     const dataMap = { rns: cache.rns, expiring: SNAPSHOT.expiringSoon || [], expired: expiredData, fsbo: SNAPSHOT.fsboAll || [] };
     const labelMap = { rns: 'removed_not_sold', expiring: 'expiring_soon', expired: 'expired', fsbo: 'fsbo' };
     const data = dataMap[hotlistSel] || [];
-    headers = ['Address', 'Agent', 'Agency', 'Date', 'URL'];
-    rows = data.map(l => [l.address, l.agent, l.agency, l.removed_at || l.first_seen || '', l.url]);
+    if (hotlistSel === 'rns') {
+      // Withdrawn hotlist: both dates (added 10 Oct 2026), matching the row pills
+      headers = ['Address', 'Agent', 'Agency', 'Listed', 'Withdrawn', 'URL'];
+      rows = data.map(l => [l.address, l.agent, l.agency, l.first_seen ? toSydDateStr(new Date(l.first_seen)) : '', l.removed_at ? toSydDateStr(new Date(l.removed_at)) : '', l.url]);
+    } else {
+      headers = ['Address', 'Agent', 'Agency', 'Date', 'URL'];
+      rows = data.map(l => [l.address, l.agent, l.agency, l.removed_at || l.first_seen || '', l.url]);
+    }
     label = `${labelMap[hotlistSel]}_${currentWindow}`;
   } else {
     const { rows: lbRows, total, view } = getLbRows();

@@ -109,9 +109,14 @@ def compute_counts(lga_id: int, ref: dt.datetime) -> dict:
     days90_start = _z(_days_back(ref, 91))
     days90_end = _z(_days_back(ref, 90))
 
-    new_listing_rows = sb_rows("listings", f"lga_id=eq.{lga_id}&status=eq.active&first_seen=gte.{start}&first_seen=lt.{end}&select=agency")
+    # Every listing first seen in the window, whatever its status now (10 Oct
+    # 2026) — same as the dashboard's "Listed" tile. It used to count only
+    # still-active non-FSBO listings, so anything listed and then withdrawn
+    # or sold within the window dropped out and the email read lower than the
+    # dashboard (57 vs 66 for Lower North Shore). New FSBO is a subset of it.
+    new_listing_rows = sb_rows("listings", f"lga_id=eq.{lga_id}&first_seen=gte.{start}&first_seen=lt.{end}&select=agency")
     fsbo_count = sum(1 for r in new_listing_rows if is_fsbo(r.get("agency")))
-    new_listings_count = len(new_listing_rows) - fsbo_count
+    new_listings_count = len(new_listing_rows)
 
     return {
         "new_listings": new_listings_count,
